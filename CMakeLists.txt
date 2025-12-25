@@ -191,6 +191,12 @@ option(
 )
 
 option(
+	ORBITER_BUILD_VULKANCLIENT
+	"Build the Vulkan graphics client"
+	OFF
+)
+
+option(
 	ORBITER_BUILD_XRSOUND
 	"Build XRSound module to enable sound in Orbiter"
 	ON
