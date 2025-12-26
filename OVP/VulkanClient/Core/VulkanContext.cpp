@@ -10,6 +10,8 @@
 #include <windows.h>
 #endif
 
+// VMA implementation - must be defined in exactly one .cpp file
+#define VMA_IMPLEMENTATION
 #include "VulkanContext.h"
 #include <iostream>
 #include <cstring>
@@ -70,8 +72,10 @@ VulkanContext::VulkanContext()
     , m_graphicsQueueFamily(0)
     , m_presentQueueFamily(0)
     , m_commandPool(VK_NULL_HANDLE)
+    , m_allocator(VK_NULL_HANDLE)
     , m_enableValidation(false)
     , m_surfaceEnabled(false)
+    , m_hasSynchronization2(false)
 #ifdef _DEBUG
     , m_debugMessenger(VK_NULL_HANDLE)
 #endif
@@ -128,6 +132,12 @@ bool VulkanContext::Init(const VulkanContextCreateInfo& info)
     }
     std::cout << "[VulkanContext] Command pool created: OK" << std::endl;
 
+    if (!CreateAllocator()) {
+        std::cerr << "[VulkanContext] Failed to create VMA allocator" << std::endl;
+        return false;
+    }
+    std::cout << "[VulkanContext] VMA allocator created: OK" << std::endl;
+
     m_initialized = true;
     return true;
 }
@@ -138,6 +148,7 @@ void VulkanContext::Shutdown()
         vkDeviceWaitIdle(m_device);
     }
 
+    DestroyAllocator();
     DestroyCommandPool();
     DestroyLogicalDevice();
     DestroyInstance();
@@ -272,6 +283,22 @@ bool VulkanContext::PickPhysicalDevice(VkSurfaceKHR surface)
     return false;
 }
 
+// Helper: Check if a device extension is supported
+static bool IsExtensionSupported(VkPhysicalDevice device, const char* extensionName)
+{
+    uint32_t extensionCount;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extensionCount);
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, extensions.data());
+
+    for (const auto& ext : extensions) {
+        if (strcmp(ext.extensionName, extensionName) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool VulkanContext::CreateLogicalDevice(VkSurfaceKHR surface)
 {
     // Collect unique queue families
@@ -294,17 +321,36 @@ bool VulkanContext::CreateLogicalDevice(VkSurfaceKHR surface)
 
     VkPhysicalDeviceFeatures deviceFeatures{};
 
-    VkDeviceCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
-    createInfo.pQueueCreateInfos = queueCreateInfos.data();
-    createInfo.pEnabledFeatures = &deviceFeatures;
-
     // Device extensions
     std::vector<const char*> deviceExtensions;
     if (m_surfaceEnabled) {
         deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     }
+
+    // Check for VK_KHR_synchronization2 support (modern barrier APIs)
+    m_hasSynchronization2 = IsExtensionSupported(m_physicalDevice, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    if (m_hasSynchronization2) {
+        deviceExtensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    }
+
+    // Build feature chain for Vulkan 1.2+ features
+    VkPhysicalDeviceSynchronization2Features sync2Features{};
+    sync2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    sync2Features.synchronization2 = m_hasSynchronization2 ? VK_TRUE : VK_FALSE;
+
+    VkPhysicalDeviceFeatures2 deviceFeatures2{};
+    deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    deviceFeatures2.features = deviceFeatures;
+    if (m_hasSynchronization2) {
+        deviceFeatures2.pNext = &sync2Features;
+    }
+
+    VkDeviceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+    createInfo.pQueueCreateInfos = queueCreateInfos.data();
+    createInfo.pNext = &deviceFeatures2;  // Use pNext for features2 instead of pEnabledFeatures
+    createInfo.pEnabledFeatures = nullptr;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.empty() ? nullptr : deviceExtensions.data();
 
@@ -326,6 +372,10 @@ bool VulkanContext::CreateLogicalDevice(VkSurfaceKHR surface)
         m_presentQueue = m_graphicsQueue;
     }
 
+    if (m_hasSynchronization2) {
+        std::cout << "[VulkanContext] Synchronization2 extension enabled: OK" << std::endl;
+    }
+
     return true;
 }
 
@@ -337,6 +387,17 @@ bool VulkanContext::CreateCommandPool()
     poolInfo.queueFamilyIndex = m_graphicsQueueFamily;
 
     return vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_commandPool) == VK_SUCCESS;
+}
+
+bool VulkanContext::CreateAllocator()
+{
+    VmaAllocatorCreateInfo allocatorInfo{};
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+    allocatorInfo.physicalDevice = m_physicalDevice;
+    allocatorInfo.device = m_device;
+    allocatorInfo.instance = m_instance;
+
+    return vmaCreateAllocator(&allocatorInfo, &m_allocator) == VK_SUCCESS;
 }
 
 uint32_t VulkanContext::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const
@@ -369,6 +430,14 @@ std::string VulkanContext::GetGPUName() const
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
     return props.deviceName;
+}
+
+void VulkanContext::DestroyAllocator()
+{
+    if (m_allocator != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(m_allocator);
+        m_allocator = VK_NULL_HANDLE;
+    }
 }
 
 void VulkanContext::DestroyCommandPool()

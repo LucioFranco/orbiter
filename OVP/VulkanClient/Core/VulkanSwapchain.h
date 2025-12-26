@@ -53,7 +53,6 @@ private:
     // Creation helpers
     bool CreateSwapchain();
     bool CreateImageViews();
-    bool CreateRenderPass();
     bool CreateFramebuffers();
     bool CreateSyncObjects();
 

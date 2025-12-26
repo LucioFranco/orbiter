@@ -12,6 +12,7 @@
 #define HEADLESSRENDERER_H
 
 #include "Core/VulkanContext.h"
+#include "Core/StagingManager.h"
 #include "Core/SceneRenderer.h"
 #include <vector>
 #include <string>
@@ -52,6 +53,10 @@ public:
     uint32_t GetWidth() const { return m_width; }
     uint32_t GetHeight() const { return m_height; }
 
+    // Access to staging manager (for advanced usage)
+    StagingManager* GetStagingManager() { return &m_stagingManager; }
+    bool UsesDeviceLocalBuffers() const;
+
     // ImGui integration (for testing)
     bool InitImGui();
     void ShutdownImGui();
@@ -64,7 +69,6 @@ private:
     bool CreateColorImage();
     bool CreateDepthImage();
     bool CreateStagingBuffer();
-    bool CreateRenderPass();
     bool CreateFramebuffer();
     bool AllocateCommandBuffer();
     bool LoadRenderDoc();
@@ -85,18 +89,21 @@ private:
     // Shared Vulkan context
     VulkanContext m_ctx;
 
+    // Staging manager for CPU->GPU uploads
+    StagingManager m_stagingManager;
+
     // Command buffer (allocated from context's command pool)
     VkCommandBuffer m_commandBuffer;
 
     // Render target
     VkImage m_colorImage;
-    VkDeviceMemory m_colorMemory;
+    VmaAllocation m_colorAllocation;
     VkImageView m_colorImageView;
     VkFormat m_colorFormat;
 
     // Depth buffer
     VkImage m_depthImage;
-    VkDeviceMemory m_depthMemory;
+    VmaAllocation m_depthAllocation;
     VkImageView m_depthImageView;
     VkFormat m_depthFormat;
 
@@ -106,7 +113,7 @@ private:
 
     // Staging buffer for readback
     VkBuffer m_stagingBuffer;
-    VkDeviceMemory m_stagingMemory;
+    VmaAllocation m_stagingAllocation;
     VkDeviceSize m_stagingSize;
 
     // Clear color (set by Clear(), used in EndFrame())

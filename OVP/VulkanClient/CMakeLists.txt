@@ -23,6 +23,24 @@ FetchContent_Declare(
 set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glm)
 
+# Fetch VMA (Vulkan Memory Allocator) - header-only
+FetchContent_Declare(
+    vma
+    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+    GIT_TAG v3.1.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(vma)
+
+# Fetch stb (stb_image for texture loading) - header-only
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(stb)
+
 set(VULKAN_SOURCE_DIR ${CMAKE_SOURCE_DIR}/OVP/VulkanClient)
 
 # Shader compilation function
@@ -48,6 +66,8 @@ endfunction()
 # Compile shaders
 compile_shader(${VULKAN_SOURCE_DIR}/Shaders/basic.vert)
 compile_shader(${VULKAN_SOURCE_DIR}/Shaders/basic.frag)
+compile_shader(${VULKAN_SOURCE_DIR}/Shaders/textured.vert)
+compile_shader(${VULKAN_SOURCE_DIR}/Shaders/textured.frag)
 
 # Create custom target for shaders
 add_custom_target(VulkanShaders DEPENDS ${SHADER_SPV_FILES})
@@ -65,19 +85,32 @@ add_library(VulkanCore STATIC
     Core/VulkanPipeline.h
     Core/VulkanBuffer.cpp
     Core/VulkanBuffer.h
+    Core/StagingManager.cpp
+    Core/StagingManager.h
     Core/SceneRenderer.cpp
     Core/SceneRenderer.h
+    Core/VulkanTexture.cpp
+    Core/VulkanTexture.h
+    Core/VulkanDescriptors.cpp
+    Core/VulkanDescriptors.h
+    Core/VulkanMemory.h
+    Core/RenderPassFactory.cpp
+    Core/RenderPassFactory.h
 )
 
 target_include_directories(VulkanCore PUBLIC
     ${Vulkan_INCLUDE_DIRS}
     ${VULKAN_SOURCE_DIR}
+    ${vma_SOURCE_DIR}/include
+    ${stb_SOURCE_DIR}
 )
 
 target_link_libraries(VulkanCore PUBLIC
     Vulkan::Vulkan
     glm::glm
 )
+
+# VMA is header-only, included via VulkanMemory.h
 
 # Add shader output directory to include paths (for loading compiled shaders)
 target_compile_definitions(VulkanCore PUBLIC

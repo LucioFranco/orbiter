@@ -6,6 +6,7 @@
 // ==============================================================
 
 #include "SceneRenderer.h"
+#include "StagingManager.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstring>
@@ -13,6 +14,7 @@
 SceneRenderer::SceneRenderer()
     : m_initialized(false)
     , m_ctx(nullptr)
+    , m_staging(nullptr)
     , m_indexCount(0)
     , m_extent{0, 0}
     , m_viewMatrix(1.0f)
@@ -24,7 +26,8 @@ SceneRenderer::~SceneRenderer() {
     Shutdown();
 }
 
-bool SceneRenderer::Init(VulkanContext* ctx, VkRenderPass renderPass, VkExtent2D extent) {
+bool SceneRenderer::Init(VulkanContext* ctx, VkRenderPass renderPass, VkExtent2D extent,
+                          StagingManager* staging) {
     if (m_initialized) {
         return true;
     }
@@ -33,6 +36,7 @@ bool SceneRenderer::Init(VulkanContext* ctx, VkRenderPass renderPass, VkExtent2D
     }
 
     m_ctx = ctx;
+    m_staging = staging;
     m_extent = extent;
 
     // Create pipeline
@@ -40,8 +44,8 @@ bool SceneRenderer::Init(VulkanContext* ctx, VkRenderPass renderPass, VkExtent2D
         return false;
     }
 
-    // Create test scene geometry
-    if (!CreateTestScene()) {
+    // Create test scene geometry (uses device-local if staging provided)
+    if (!CreateTestScene(staging)) {
         m_pipeline.Shutdown();
         return false;
     }
@@ -63,7 +67,12 @@ void SceneRenderer::Shutdown() {
     m_pipeline.Shutdown();
 
     m_ctx = nullptr;
+    m_staging = nullptr;
     m_initialized = false;
+}
+
+bool SceneRenderer::UsesDeviceLocalMemory() const {
+    return m_initialized && m_vertexBuffer.IsDeviceLocal();
 }
 
 void SceneRenderer::SetViewport(VkExtent2D extent) {
@@ -130,7 +139,7 @@ void SceneRenderer::Render(VkCommandBuffer cmd) {
     vkCmdDrawIndexed(cmd, m_indexCount, 1, 0, 0, 0);
 }
 
-bool SceneRenderer::CreateTestScene() {
+bool SceneRenderer::CreateTestScene(StagingManager* staging) {
     // Simple colored triangle
     // Vertices: position (vec3) + color (vec3) = 24 bytes each
     BasicVertex vertices[] = {
@@ -143,41 +152,55 @@ bool SceneRenderer::CreateTestScene() {
     uint16_t indices[] = { 0, 1, 2 };
     m_indexCount = 3;
 
-    // Create vertex buffer
     VkDeviceSize vertexBufferSize = sizeof(vertices);
-    if (!m_vertexBuffer.Create(m_ctx, vertexBufferSize,
-                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-        return false;
-    }
-
-    // Copy vertex data
-    void* data = m_vertexBuffer.Map();
-    if (!data) {
-        m_vertexBuffer.Destroy();
-        return false;
-    }
-    memcpy(data, vertices, vertexBufferSize);
-    m_vertexBuffer.Unmap();
-
-    // Create index buffer
     VkDeviceSize indexBufferSize = sizeof(indices);
-    if (!m_indexBuffer.Create(m_ctx, indexBufferSize,
-                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-        m_vertexBuffer.Destroy();
-        return false;
-    }
 
-    // Copy index data
-    data = m_indexBuffer.Map();
-    if (!data) {
-        m_indexBuffer.Destroy();
-        m_vertexBuffer.Destroy();
-        return false;
+    // Use device-local memory with staging if available (optimal GPU performance)
+    if (staging && staging->IsInitialized()) {
+        // Create device-local vertex buffer with initial data
+        if (!m_vertexBuffer.CreateDeviceLocal(m_ctx, staging, vertexBufferSize,
+                                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices)) {
+            return false;
+        }
+
+        // Create device-local index buffer with initial data
+        if (!m_indexBuffer.CreateDeviceLocal(m_ctx, staging, indexBufferSize,
+                                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices)) {
+            m_vertexBuffer.Destroy();
+            return false;
+        }
+    } else {
+        // Fallback: host-visible memory (slower but works without staging)
+        if (!m_vertexBuffer.Create(m_ctx, vertexBufferSize,
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            return false;
+        }
+
+        void* data = m_vertexBuffer.Map();
+        if (!data) {
+            m_vertexBuffer.Destroy();
+            return false;
+        }
+        memcpy(data, vertices, vertexBufferSize);
+        m_vertexBuffer.Unmap();
+
+        if (!m_indexBuffer.Create(m_ctx, indexBufferSize,
+                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            m_vertexBuffer.Destroy();
+            return false;
+        }
+
+        data = m_indexBuffer.Map();
+        if (!data) {
+            m_indexBuffer.Destroy();
+            m_vertexBuffer.Destroy();
+            return false;
+        }
+        memcpy(data, indices, indexBufferSize);
+        m_indexBuffer.Unmap();
     }
-    memcpy(data, indices, indexBufferSize);
-    m_indexBuffer.Unmap();
 
     return true;
 }

@@ -108,7 +108,21 @@ HWND VulkanClient::clbkCreateRenderWindow()
     // Set window title to indicate Vulkan is working
     SetWindowText(hWnd, "[VulkanClient]");
 
-    // Get window size
+    // VulkanClient defaults to 1080p window size
+    const uint32_t targetWidth = 1920;
+    const uint32_t targetHeight = 1080;
+
+    // Resize window to 1080p (calculate window size from client size)
+    RECT windowRect = { 0, 0, static_cast<LONG>(targetWidth), static_cast<LONG>(targetHeight) };
+    DWORD style = GetWindowLong(hWnd, GWL_STYLE);
+    DWORD exStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
+    AdjustWindowRectEx(&windowRect, style, FALSE, exStyle);
+
+    int windowWidth = windowRect.right - windowRect.left;
+    int windowHeight = windowRect.bottom - windowRect.top;
+    SetWindowPos(hWnd, NULL, 0, 0, windowWidth, windowHeight, SWP_NOMOVE | SWP_NOZORDER);
+
+    // Get actual window size after resize
     RECT rect;
     GetClientRect(hWnd, &rect);
     m_viewportWidth = rect.right - rect.left;

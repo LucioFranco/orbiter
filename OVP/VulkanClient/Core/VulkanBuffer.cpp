@@ -6,13 +6,15 @@
 // ==============================================================
 
 #include "VulkanBuffer.h"
+#include "StagingManager.h"
 
 VulkanBuffer::VulkanBuffer()
     : m_ctx(nullptr)
     , m_buffer(VK_NULL_HANDLE)
-    , m_memory(VK_NULL_HANDLE)
+    , m_allocation(VK_NULL_HANDLE)
     , m_size(0)
     , m_mapped(nullptr)
+    , m_deviceLocal(false)
 {
 }
 
@@ -31,50 +33,82 @@ bool VulkanBuffer::Create(VulkanContext* ctx, VkDeviceSize size,
 
     m_ctx = ctx;
     m_size = size;
-    VkDevice device = ctx->GetDevice();
 
-    // Create buffer
+    // Buffer create info
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
     bufferInfo.usage = usage;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(device, &bufferInfo, nullptr, &m_buffer) != VK_SUCCESS) {
+    // VMA allocation info
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocInfo.requiredFlags = properties;
+
+    // For host-visible memory, specify how we'll access it
+    if (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                          VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    }
+
+    // Create buffer and allocate memory in one call
+    VkResult result = vmaCreateBuffer(ctx->GetAllocator(), &bufferInfo, &allocInfo,
+                                       &m_buffer, &m_allocation, nullptr);
+
+    if (result == VK_SUCCESS) {
+        m_deviceLocal = (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+    }
+
+    return result == VK_SUCCESS;
+}
+
+bool VulkanBuffer::CreateDeviceLocal(VulkanContext* ctx, StagingManager* staging,
+                                      VkDeviceSize size, VkBufferUsageFlags usage,
+                                      const void* data) {
+    if (m_buffer != VK_NULL_HANDLE) {
+        return false;  // Already created
+    }
+    if (!ctx || !ctx->IsInitialized() || !staging || !staging->IsInitialized() || size == 0) {
         return false;
     }
 
-    // Get memory requirements
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device, m_buffer, &memRequirements);
+    m_ctx = ctx;
+    m_size = size;
 
-    // Find suitable memory type
-    uint32_t memoryTypeIndex = ctx->FindMemoryType(memRequirements.memoryTypeBits, properties);
-    if (memoryTypeIndex == UINT32_MAX) {
-        vkDestroyBuffer(device, m_buffer, nullptr);
+    // Buffer create info - add TRANSFER_DST for staging uploads
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    // VMA allocation info - prefer device-local memory
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    allocInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    // Create buffer and allocate memory
+    VkResult result = vmaCreateBuffer(ctx->GetAllocator(), &bufferInfo, &allocInfo,
+                                       &m_buffer, &m_allocation, nullptr);
+
+    if (result != VK_SUCCESS) {
         m_buffer = VK_NULL_HANDLE;
+        m_allocation = VK_NULL_HANDLE;
+        m_size = 0;
+        m_ctx = nullptr;
         return false;
     }
 
-    // Allocate memory
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = memoryTypeIndex;
+    m_deviceLocal = true;
 
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &m_memory) != VK_SUCCESS) {
-        vkDestroyBuffer(device, m_buffer, nullptr);
-        m_buffer = VK_NULL_HANDLE;
-        return false;
-    }
-
-    // Bind buffer to memory
-    if (vkBindBufferMemory(device, m_buffer, m_memory, 0) != VK_SUCCESS) {
-        vkFreeMemory(device, m_memory, nullptr);
-        vkDestroyBuffer(device, m_buffer, nullptr);
-        m_buffer = VK_NULL_HANDLE;
-        m_memory = VK_NULL_HANDLE;
-        return false;
+    // Upload initial data via staging buffer
+    if (data) {
+        if (!staging->UploadBuffer(m_buffer, data, size, 0)) {
+            Destroy();
+            return false;
+        }
+        staging->Flush();  // Wait for upload to complete
     }
 
     return true;
@@ -89,15 +123,14 @@ void VulkanBuffer::Destroy() {
         Unmap();
     }
 
-    VkDevice device = m_ctx->GetDevice();
-
-    vkDestroyBuffer(device, m_buffer, nullptr);
-    vkFreeMemory(device, m_memory, nullptr);
+    // VMA destroys buffer and frees memory in one call
+    vmaDestroyBuffer(m_ctx->GetAllocator(), m_buffer, m_allocation);
 
     m_buffer = VK_NULL_HANDLE;
-    m_memory = VK_NULL_HANDLE;
+    m_allocation = VK_NULL_HANDLE;
     m_size = 0;
     m_ctx = nullptr;
+    m_deviceLocal = false;
 }
 
 void* VulkanBuffer::Map() {
@@ -105,7 +138,7 @@ void* VulkanBuffer::Map() {
         return m_mapped;
     }
 
-    if (vkMapMemory(m_ctx->GetDevice(), m_memory, 0, m_size, 0, &m_mapped) != VK_SUCCESS) {
+    if (vmaMapMemory(m_ctx->GetAllocator(), m_allocation, &m_mapped) != VK_SUCCESS) {
         m_mapped = nullptr;
     }
 
@@ -117,6 +150,6 @@ void VulkanBuffer::Unmap() {
         return;
     }
 
-    vkUnmapMemory(m_ctx->GetDevice(), m_memory);
+    vmaUnmapMemory(m_ctx->GetAllocator(), m_allocation);
     m_mapped = nullptr;
 }

@@ -12,6 +12,9 @@
 
 #include "VulkanContext.h"
 
+// Forward declaration
+class StagingManager;
+
 class VulkanBuffer {
 public:
     VulkanBuffer();
@@ -20,24 +23,32 @@ public:
     // Lifecycle
     bool Create(VulkanContext* ctx, VkDeviceSize size,
                 VkBufferUsageFlags usage, VkMemoryPropertyFlags properties);
+
+    // Create device-local buffer with initial data (uploads via staging)
+    bool CreateDeviceLocal(VulkanContext* ctx, StagingManager* staging,
+                           VkDeviceSize size, VkBufferUsageFlags usage,
+                           const void* data);
+
     void Destroy();
     bool IsCreated() const { return m_buffer != VK_NULL_HANDLE; }
+    bool IsDeviceLocal() const { return m_deviceLocal; }
 
-    // Memory access
+    // Memory access (only for host-visible buffers)
     void* Map();
     void Unmap();
 
     // Accessors
     VkBuffer GetBuffer() const { return m_buffer; }
-    VkDeviceMemory GetMemory() const { return m_memory; }
+    VmaAllocation GetAllocation() const { return m_allocation; }
     VkDeviceSize GetSize() const { return m_size; }
 
 private:
     VulkanContext* m_ctx;
     VkBuffer m_buffer;
-    VkDeviceMemory m_memory;
+    VmaAllocation m_allocation;
     VkDeviceSize m_size;
     void* m_mapped;
+    bool m_deviceLocal;
 };
 
 #endif // VULKANBUFFER_H

@@ -6,6 +6,7 @@
 // ==============================================================
 
 #include "VulkanSwapchain.h"
+#include "RenderPassFactory.h"
 #include <algorithm>
 #include <array>
 #include <iostream>
@@ -66,11 +67,18 @@ bool VulkanSwapchain::Init(VulkanContext* ctx, VkSurfaceKHR surface, uint32_t wi
     }
     std::cout << "[VulkanSwapchain] Depth buffer created" << std::endl;
 
-    if (!CreateRenderPass()) {
+    // Create render pass using shared factory (same config as headless renderer)
+    m_renderPass = RenderPassFactory::CreateMainRenderPass(
+        m_ctx->GetDevice(),
+        m_format,
+        m_depthFormat,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR  // For window presentation
+    );
+    if (m_renderPass == VK_NULL_HANDLE) {
         std::cerr << "[VulkanSwapchain] Failed to create render pass" << std::endl;
         return false;
     }
-    std::cout << "[VulkanSwapchain] Render pass created" << std::endl;
+    std::cout << "[VulkanSwapchain] Render pass created (shared factory)" << std::endl;
 
     if (!CreateFramebuffers()) {
         std::cerr << "[VulkanSwapchain] Failed to create framebuffers" << std::endl;
@@ -135,7 +143,14 @@ bool VulkanSwapchain::Recreate(uint32_t width, uint32_t height)
         return false;
     }
 
-    if (!CreateRenderPass()) {
+    // Create render pass using shared factory
+    m_renderPass = RenderPassFactory::CreateMainRenderPass(
+        m_ctx->GetDevice(),
+        m_format,
+        m_depthFormat,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+    );
+    if (m_renderPass == VK_NULL_HANDLE) {
         return false;
     }
 
@@ -337,67 +352,6 @@ bool VulkanSwapchain::CreateImageViews()
     }
 
     return true;
-}
-
-bool VulkanSwapchain::CreateRenderPass()
-{
-    // Color attachment
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = m_format;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    // Depth attachment
-    VkAttachmentDescription depthAttachment{};
-    depthAttachment.format = m_depthFormat;
-    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // Don't need depth after render
-    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference colorRef{};
-    colorRef.attachment = 0;
-    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference depthRef{};
-    depthRef.attachment = 1;
-    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorRef;
-    subpass.pDepthStencilAttachment = &depthRef;
-
-    // Dependencies for color and depth
-    VkSubpassDependency dependency{};
-    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = 0;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-    std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
-
-    VkRenderPassCreateInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-    renderPassInfo.pAttachments = attachments.data();
-    renderPassInfo.subpassCount = 1;
-    renderPassInfo.pSubpasses = &subpass;
-    renderPassInfo.dependencyCount = 1;
-    renderPassInfo.pDependencies = &dependency;
-
-    return vkCreateRenderPass(m_ctx->GetDevice(), &renderPassInfo, nullptr, &m_renderPass) == VK_SUCCESS;
 }
 
 bool VulkanSwapchain::CreateFramebuffers()

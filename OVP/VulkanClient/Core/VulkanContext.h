@@ -12,6 +12,7 @@
 #define VULKANCONTEXT_H
 
 #include <vulkan/vulkan.h>
+#include "VulkanMemory.h"
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -45,6 +46,8 @@ public:
     uint32_t GetGraphicsQueueFamily() const { return m_graphicsQueueFamily; }
     uint32_t GetPresentQueueFamily() const { return m_presentQueueFamily; }
     VkCommandPool GetCommandPool() const { return m_commandPool; }
+    VmaAllocator GetAllocator() const { return m_allocator; }
+    bool HasSynchronization2() const { return m_hasSynchronization2; }
 
     // Utilities
     uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
@@ -59,8 +62,10 @@ private:
     bool PickPhysicalDevice(VkSurfaceKHR surface);
     bool CreateLogicalDevice(VkSurfaceKHR surface);
     bool CreateCommandPool();
+    bool CreateAllocator();
 
     // Cleanup helpers
+    void DestroyAllocator();
     void DestroyCommandPool();
     void DestroyLogicalDevice();
     void DestroyInstance();
@@ -77,10 +82,12 @@ private:
     uint32_t m_graphicsQueueFamily;
     uint32_t m_presentQueueFamily;
     VkCommandPool m_commandPool;
+    VmaAllocator m_allocator;
 
     // Configuration
     bool m_enableValidation;
     bool m_surfaceEnabled;
+    bool m_hasSynchronization2;
 
 #ifdef _DEBUG
     VkDebugUtilsMessengerEXT m_debugMessenger;

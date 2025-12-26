@@ -6,6 +6,7 @@
 // ==============================================================
 
 #include "HeadlessRenderer.h"
+#include "Core/RenderPassFactory.h"
 #include <cstring>
 #include <iostream>
 #include <array>
@@ -71,17 +72,17 @@ HeadlessRenderer::HeadlessRenderer()
     , m_height(0)
     , m_commandBuffer(VK_NULL_HANDLE)
     , m_colorImage(VK_NULL_HANDLE)
-    , m_colorMemory(VK_NULL_HANDLE)
+    , m_colorAllocation(VK_NULL_HANDLE)
     , m_colorImageView(VK_NULL_HANDLE)
-    , m_colorFormat(VK_FORMAT_R8G8B8A8_UNORM)
+    , m_colorFormat(VK_FORMAT_B8G8R8A8_UNORM)
     , m_depthImage(VK_NULL_HANDLE)
-    , m_depthMemory(VK_NULL_HANDLE)
+    , m_depthAllocation(VK_NULL_HANDLE)
     , m_depthImageView(VK_NULL_HANDLE)
     , m_depthFormat(VK_FORMAT_D32_SFLOAT)
     , m_renderPass(VK_NULL_HANDLE)
     , m_framebuffer(VK_NULL_HANDLE)
     , m_stagingBuffer(VK_NULL_HANDLE)
-    , m_stagingMemory(VK_NULL_HANDLE)
+    , m_stagingAllocation(VK_NULL_HANDLE)
     , m_stagingSize(0)
     , m_renderDocModule(nullptr)
     , m_renderDocApi(nullptr)
@@ -145,11 +146,18 @@ bool HeadlessRenderer::Init(uint32_t width, uint32_t height)
     }
     std::cout << "[API] Staging buffer created: OK" << std::endl;
 
-    if (!CreateRenderPass()) {
+    // Create render pass using shared factory (same config as window renderer)
+    m_renderPass = RenderPassFactory::CreateMainRenderPass(
+        m_ctx.GetDevice(),
+        m_colorFormat,
+        m_depthFormat,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL  // For readback
+    );
+    if (m_renderPass == VK_NULL_HANDLE) {
         std::cerr << "[HeadlessRenderer] Failed to create render pass" << std::endl;
         return false;
     }
-    std::cout << "[API] Render pass created: OK" << std::endl;
+    std::cout << "[API] Render pass created: OK (shared factory)" << std::endl;
 
     if (!CreateFramebuffer()) {
         std::cerr << "[HeadlessRenderer] Failed to create framebuffer" << std::endl;
@@ -163,13 +171,26 @@ bool HeadlessRenderer::Init(uint32_t width, uint32_t height)
     }
     std::cout << "[API] Command buffer allocated: OK" << std::endl;
 
+    // Initialize StagingManager for device-local buffer uploads
+    if (m_stagingManager.Init(&m_ctx)) {
+        std::cout << "[API] StagingManager initialized: OK (device-local buffers enabled)" << std::endl;
+    } else {
+        std::cout << "[API] StagingManager initialization: SKIPPED (using host-visible fallback)" << std::endl;
+    }
+
     m_initialized = true;
 
     // Initialize SceneRenderer (after render pass is created)
+    // Pass staging manager if available for device-local buffers
     VkExtent2D extent = { m_width, m_height };
-    if (m_sceneRenderer.Init(&m_ctx, m_renderPass, extent)) {
+    StagingManager* staging = m_stagingManager.IsInitialized() ? &m_stagingManager : nullptr;
+    if (m_sceneRenderer.Init(&m_ctx, m_renderPass, extent, staging)) {
         m_sceneRendererInitialized = true;
-        std::cout << "[API] SceneRenderer initialized: OK" << std::endl;
+        std::cout << "[API] SceneRenderer initialized: OK";
+        if (m_sceneRenderer.UsesDeviceLocalMemory()) {
+            std::cout << " (device-local buffers)";
+        }
+        std::cout << std::endl;
     } else {
         std::cout << "[API] SceneRenderer initialization: SKIPPED (optional)" << std::endl;
     }
@@ -191,6 +212,9 @@ void HeadlessRenderer::Shutdown()
 
     // Shutdown ImGui (before destroying Vulkan resources)
     ShutdownImGui();
+
+    // Shutdown staging manager
+    m_stagingManager.Shutdown();
 
     DestroyFramebuffer();
     DestroyRenderPass();
@@ -215,6 +239,7 @@ void HeadlessRenderer::Shutdown()
 bool HeadlessRenderer::CreateColorImage()
 {
     VkDevice device = m_ctx.GetDevice();
+    VmaAllocator allocator = m_ctx.GetAllocator();
 
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -228,23 +253,14 @@ bool HeadlessRenderer::CreateColorImage()
     imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device, &imageInfo, nullptr, &m_colorImage) != VK_SUCCESS) {
+    VmaAllocationCreateInfo allocCreateInfo{};
+    allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    allocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo,
+                        &m_colorImage, &m_colorAllocation, nullptr) != VK_SUCCESS) {
         return false;
     }
-
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, m_colorImage, &memReqs);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = m_ctx.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &m_colorMemory) != VK_SUCCESS) {
-        return false;
-    }
-
-    vkBindImageMemory(device, m_colorImage, m_colorMemory, 0);
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -287,6 +303,7 @@ VkFormat HeadlessRenderer::ChooseDepthFormat()
 bool HeadlessRenderer::CreateDepthImage()
 {
     VkDevice device = m_ctx.GetDevice();
+    VmaAllocator allocator = m_ctx.GetAllocator();
     m_depthFormat = ChooseDepthFormat();
 
     VkImageCreateInfo imageInfo{};
@@ -301,25 +318,14 @@ bool HeadlessRenderer::CreateDepthImage()
     imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(device, &imageInfo, nullptr, &m_depthImage) != VK_SUCCESS) {
+    VmaAllocationCreateInfo allocCreateInfo{};
+    allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    allocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo,
+                        &m_depthImage, &m_depthAllocation, nullptr) != VK_SUCCESS) {
         return false;
     }
-
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, m_depthImage, &memReqs);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = m_ctx.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &m_depthMemory) != VK_SUCCESS) {
-        vkDestroyImage(device, m_depthImage, nullptr);
-        m_depthImage = VK_NULL_HANDLE;
-        return false;
-    }
-
-    vkBindImageMemory(device, m_depthImage, m_depthMemory, 0);
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -334,10 +340,9 @@ bool HeadlessRenderer::CreateDepthImage()
     viewInfo.subresourceRange.layerCount = 1;
 
     if (vkCreateImageView(device, &viewInfo, nullptr, &m_depthImageView) != VK_SUCCESS) {
-        vkFreeMemory(device, m_depthMemory, nullptr);
-        vkDestroyImage(device, m_depthImage, nullptr);
+        vmaDestroyImage(allocator, m_depthImage, m_depthAllocation);
         m_depthImage = VK_NULL_HANDLE;
-        m_depthMemory = VK_NULL_HANDLE;
+        m_depthAllocation = VK_NULL_HANDLE;
         return false;
     }
 
@@ -346,7 +351,7 @@ bool HeadlessRenderer::CreateDepthImage()
 
 bool HeadlessRenderer::CreateStagingBuffer()
 {
-    VkDevice device = m_ctx.GetDevice();
+    VmaAllocator allocator = m_ctx.GetAllocator();
 
     m_stagingSize = m_width * m_height * 4; // RGBA
 
@@ -355,74 +360,15 @@ bool HeadlessRenderer::CreateStagingBuffer()
     bufferInfo.size = m_stagingSize;
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-    if (vkCreateBuffer(device, &bufferInfo, nullptr, &m_stagingBuffer) != VK_SUCCESS) {
-        return false;
-    }
+    VmaAllocationCreateInfo allocCreateInfo{};
+    allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                            VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    allocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(device, m_stagingBuffer, &memReqs);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = m_ctx.FindMemoryType(memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &m_stagingMemory) != VK_SUCCESS) {
-        return false;
-    }
-
-    return vkBindBufferMemory(device, m_stagingBuffer, m_stagingMemory, 0) == VK_SUCCESS;
-}
-
-bool HeadlessRenderer::CreateRenderPass()
-{
-    // Color attachment
-    VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = m_colorFormat;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-
-    // Depth attachment
-    VkAttachmentDescription depthAttachment{};
-    depthAttachment.format = m_depthFormat;
-    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference colorRef{};
-    colorRef.attachment = 0;
-    colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference depthRef{};
-    depthRef.attachment = 1;
-    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &colorRef;
-    subpass.pDepthStencilAttachment = &depthRef;
-
-    std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
-
-    VkRenderPassCreateInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-    renderPassInfo.pAttachments = attachments.data();
-    renderPassInfo.subpassCount = 1;
-    renderPassInfo.pSubpasses = &subpass;
-
-    return vkCreateRenderPass(m_ctx.GetDevice(), &renderPassInfo, nullptr, &m_renderPass) == VK_SUCCESS;
+    return vmaCreateBuffer(allocator, &bufferInfo, &allocCreateInfo,
+                            &m_stagingBuffer, &m_stagingAllocation, nullptr) == VK_SUCCESS;
 }
 
 bool HeadlessRenderer::CreateFramebuffer()
@@ -543,7 +489,7 @@ void HeadlessRenderer::Submit()
 std::vector<uint8_t> HeadlessRenderer::ReadPixels()
 {
     std::vector<uint8_t> pixels(m_width * m_height * 4);
-    VkDevice device = m_ctx.GetDevice();
+    VmaAllocator allocator = m_ctx.GetAllocator();
 
     // Record copy command
     VkCommandBufferBeginInfo beginInfo{};
@@ -577,11 +523,11 @@ std::vector<uint8_t> HeadlessRenderer::ReadPixels()
     vkQueueSubmit(m_ctx.GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(m_ctx.GetGraphicsQueue());
 
-    // Map and copy
+    // Map and copy using VMA
     void* data;
-    vkMapMemory(device, m_stagingMemory, 0, m_stagingSize, 0, &data);
+    vmaMapMemory(allocator, m_stagingAllocation, &data);
     memcpy(pixels.data(), data, pixels.size());
-    vkUnmapMemory(device, m_stagingMemory);
+    vmaUnmapMemory(allocator, m_stagingAllocation);
 
     return pixels;
 }
@@ -640,12 +586,18 @@ uint32_t HeadlessRenderer::GetCaptureCount() const
     return 0;
 }
 
+bool HeadlessRenderer::UsesDeviceLocalBuffers() const
+{
+    return m_sceneRendererInitialized && m_sceneRenderer.UsesDeviceLocalMemory();
+}
+
 void HeadlessRenderer::PrintDiagnostics()
 {
     std::cout << "\n=== HEADLESS RENDERER DIAGNOSTICS ===" << std::endl;
     std::cout << "GPU: " << GetGPUName() << std::endl;
     std::cout << "Resolution: " << m_width << "x" << m_height << std::endl;
-    std::cout << "Format: VK_FORMAT_R8G8B8A8_UNORM" << std::endl;
+    std::cout << "Format: VK_FORMAT_B8G8R8A8_UNORM" << std::endl;
+    std::cout << "Device-local buffers: " << (UsesDeviceLocalBuffers() ? "Yes" : "No") << std::endl;
     std::cout << "RenderDoc: " << (IsRenderDocAvailable() ? "Available" : "Not available") << std::endl;
     if (IsRenderDocAvailable()) {
         std::cout << "Captures: " << GetCaptureCount() << std::endl;
@@ -674,48 +626,43 @@ void HeadlessRenderer::DestroyRenderPass()
 
 void HeadlessRenderer::DestroyStagingBuffer()
 {
-    VkDevice device = m_ctx.GetDevice();
-    if (m_stagingBuffer != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, m_stagingBuffer, nullptr);
+    VmaAllocator allocator = m_ctx.GetAllocator();
+    if (m_stagingBuffer != VK_NULL_HANDLE && allocator != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(allocator, m_stagingBuffer, m_stagingAllocation);
         m_stagingBuffer = VK_NULL_HANDLE;
-    }
-    if (m_stagingMemory != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        vkFreeMemory(device, m_stagingMemory, nullptr);
-        m_stagingMemory = VK_NULL_HANDLE;
+        m_stagingAllocation = VK_NULL_HANDLE;
     }
 }
 
 void HeadlessRenderer::DestroyColorImage()
 {
     VkDevice device = m_ctx.GetDevice();
+    VmaAllocator allocator = m_ctx.GetAllocator();
+
     if (m_colorImageView != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
         vkDestroyImageView(device, m_colorImageView, nullptr);
         m_colorImageView = VK_NULL_HANDLE;
     }
-    if (m_colorImage != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        vkDestroyImage(device, m_colorImage, nullptr);
+    if (m_colorImage != VK_NULL_HANDLE && allocator != VK_NULL_HANDLE) {
+        vmaDestroyImage(allocator, m_colorImage, m_colorAllocation);
         m_colorImage = VK_NULL_HANDLE;
-    }
-    if (m_colorMemory != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        vkFreeMemory(device, m_colorMemory, nullptr);
-        m_colorMemory = VK_NULL_HANDLE;
+        m_colorAllocation = VK_NULL_HANDLE;
     }
 }
 
 void HeadlessRenderer::DestroyDepthImage()
 {
     VkDevice device = m_ctx.GetDevice();
+    VmaAllocator allocator = m_ctx.GetAllocator();
+
     if (m_depthImageView != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
         vkDestroyImageView(device, m_depthImageView, nullptr);
         m_depthImageView = VK_NULL_HANDLE;
     }
-    if (m_depthImage != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        vkDestroyImage(device, m_depthImage, nullptr);
+    if (m_depthImage != VK_NULL_HANDLE && allocator != VK_NULL_HANDLE) {
+        vmaDestroyImage(allocator, m_depthImage, m_depthAllocation);
         m_depthImage = VK_NULL_HANDLE;
-    }
-    if (m_depthMemory != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-        vkFreeMemory(device, m_depthMemory, nullptr);
-        m_depthMemory = VK_NULL_HANDLE;
+        m_depthAllocation = VK_NULL_HANDLE;
     }
 }
 
