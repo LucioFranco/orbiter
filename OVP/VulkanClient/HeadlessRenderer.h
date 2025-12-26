@@ -11,7 +11,7 @@
 #ifndef HEADLESSRENDERER_H
 #define HEADLESSRENDERER_H
 
-#include <vulkan/vulkan.h>
+#include "Core/VulkanContext.h"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -46,16 +46,19 @@ public:
 
     // Diagnostics
     void PrintDiagnostics();
-    std::string GetGPUName() const;
+    std::string GetGPUName() const { return m_ctx.GetGPUName(); }
     uint32_t GetWidth() const { return m_width; }
     uint32_t GetHeight() const { return m_height; }
 
+    // ImGui integration (for testing)
+    bool InitImGui();
+    void ShutdownImGui();
+    bool IsImGuiInitialized() const { return m_imguiInitialized; }
+    void ImGuiNewFrame();
+    void ImGuiRender();  // Call between BeginFrame() and EndFrame()
+
 private:
-    // Initialization helpers
-    bool CreateInstance();
-    bool PickPhysicalDevice();
-    bool CreateLogicalDevice();
-    bool CreateCommandPool();
+    // Initialization helpers (renderer-specific resources)
     bool CreateColorImage();
     bool CreateStagingBuffer();
     bool CreateRenderPass();
@@ -68,27 +71,16 @@ private:
     void DestroyRenderPass();
     void DestroyStagingBuffer();
     void DestroyColorImage();
-    void DestroyCommandPool();
-    void DestroyLogicalDevice();
-    void DestroyInstance();
-
-    // Memory helpers
-    uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
     // State
     bool m_initialized;
     uint32_t m_width;
     uint32_t m_height;
 
-    // Vulkan core
-    VkInstance m_instance;
-    VkPhysicalDevice m_physicalDevice;
-    VkDevice m_device;
-    VkQueue m_queue;
-    uint32_t m_queueFamilyIndex;
+    // Shared Vulkan context
+    VulkanContext m_ctx;
 
-    // Command buffer
-    VkCommandPool m_commandPool;
+    // Command buffer (allocated from context's command pool)
     VkCommandBuffer m_commandBuffer;
 
     // Render target
@@ -109,14 +101,16 @@ private:
     // Clear color (set by Clear(), used in EndFrame())
     float m_clearColor[4];
 
+    // Render pass state
+    bool m_renderPassStarted;
+
     // RenderDoc
     void* m_renderDocModule;
     RENDERDOC_API_1_6_0* m_renderDocApi;
 
-#ifdef _DEBUG
-    VkDebugUtilsMessengerEXT m_debugMessenger;
-    bool m_enableValidation;
-#endif
+    // ImGui state
+    VkDescriptorPool m_imguiDescriptorPool;
+    bool m_imguiInitialized;
 };
 
 #endif // HEADLESSRENDERER_H

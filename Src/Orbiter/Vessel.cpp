@@ -2277,6 +2277,7 @@ oapi::ParticleStream *Vessel::AddExhaustStream (ThrustSpec *ts, PARTICLESTREAMSP
 	}
 	contrail = tmp;
 	contrail[ncontrail] = gc->clbkCreateExhaustStream (pss, (OBJHANDLE)this, &ts->level, &ts->ref, &ts->dir);
+	if (!contrail[ncontrail]) return 0; // Graphics client doesn't support particle streams
 	if (pos) // local position reference
 		contrail[ncontrail]->SetFixedPos (MakeVECTOR3(*pos));
 	if (dir) // local direction reference

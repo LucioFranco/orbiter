@@ -1,0 +1,19 @@
+// ==============================================================
+// VulkanClient.rc
+// Part of the ORBITER VISUALISATION PROJECT (OVP)
+// Dual licensed under GPL v3 and LGPL v3
+// Copyright (C) 2024
+// ==============================================================
+
+#include <windows.h>
+#include "resource.h"
+
+//
+// String Table resources
+//
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
+STRINGTABLE
+{
+    IDS_INFO    "Vulkan Graphics Client for Orbiter"
+    IDS_TYPE    "Graphics engines"
+}

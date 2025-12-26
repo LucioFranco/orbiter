@@ -9,8 +9,12 @@
 #define VULKANCLIENT_H
 
 #include "GraphicsAPI.h"
-#include <vulkan/vulkan.h>
+#include "Core/VulkanContext.h"
+#include "Core/VulkanSwapchain.h"
 #include <vector>
+
+// Forward declare ImGui types
+struct ImGui_ImplVulkan_InitInfo;
 
 #ifdef VULKANCLIENT_EXPORTS
 #define VULKANCLIENT_API DLLEXPORT
@@ -32,40 +36,61 @@ public:
     VulkanClient(HINSTANCE hInstance);
     ~VulkanClient();
 
-    // GraphicsClient interface overrides
+    // GraphicsClient interface overrides - Lifecycle
     bool clbkInitialise() override;
+    HWND clbkCreateRenderWindow() override;
+    void clbkDestroyRenderWindow(bool fastclose) override;
+
+    // GraphicsClient interface overrides - Rendering
+    void clbkRenderScene() override;
+    bool clbkDisplayFrame() override;
+
+    // GraphicsClient interface overrides - Info
     bool clbkFullscreenMode() const override { return false; }
     void clbkGetViewportSize(DWORD *width, DWORD *height) const override;
     bool clbkGetRenderParam(DWORD param, DWORD *value) const override;
-    void clbkRenderScene() override {}
 
-    // ImGui stubs (required pure virtuals)
-    void clbkImGuiNewFrame() override {}
-    void clbkImGuiRenderDrawData() override {}
-    void clbkImGuiInit() override {}
-    void clbkImGuiShutdown() override {}
+    // ImGui interface
+    void clbkImGuiNewFrame() override;
+    void clbkImGuiRenderDrawData() override;
+    void clbkImGuiInit() override;
+    void clbkImGuiShutdown() override;
     uint64_t clbkImGuiSurfaceTexture(SURFHANDLE surf) override { return 0; }
 
     /**
      * \brief Returns the Vulkan instance.
      */
-    VkInstance GetVulkanInstance() const { return m_instance; }
+    VkInstance GetVulkanInstance() const { return m_ctx.GetInstance(); }
 
 private:
-    bool CreateInstance();
-    void DestroyInstance();
+    // Rendering helpers
+    void RecordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
 
-    bool CheckValidationLayerSupport();
-    std::vector<const char*> GetRequiredExtensions();
+    // Shared Vulkan context
+    VulkanContext m_ctx;
 
-    VkInstance m_instance;
-    bool m_enableValidationLayers;
+    // Window surface
+    VkSurfaceKHR m_surface;
 
-#ifdef _DEBUG
-    VkDebugUtilsMessengerEXT m_debugMessenger;
-    bool SetupDebugMessenger();
-    void DestroyDebugMessenger();
-#endif
+    // Swapchain
+    VulkanSwapchain m_swapchain;
+
+    // Command buffers (one per frame in flight)
+    VkCommandBuffer m_commandBuffers[VulkanSwapchain::MAX_FRAMES_IN_FLIGHT];
+
+    // Clear color (cornflower blue)
+    float m_clearColor[4];
+
+    // Viewport size cache
+    uint32_t m_viewportWidth;
+    uint32_t m_viewportHeight;
+
+    // ImGui state
+    VkDescriptorPool m_imguiDescriptorPool;
+    bool m_imguiInitialized;
+
+    // Frame state - tracks if clbkRenderScene started a frame successfully
+    bool m_frameInProgress;
 };
 
 #endif // !VULKANCLIENT_H

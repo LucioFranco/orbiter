@@ -11,6 +11,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+# Copy fonts to build directory for development builds
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/Fonts)
+file(COPY
+    ${imgui_SOURCE_DIR}/misc/fonts/Roboto-Medium.ttf
+    ${imgui_SOURCE_DIR}/misc/fonts/Cousine-Regular.ttf
+    ${CMAKE_CURRENT_SOURCE_DIR}/fa-solid-900.ttf
+    ${CMAKE_CURRENT_SOURCE_DIR}/Lekton-Bold.ttf
+    ${CMAKE_CURRENT_SOURCE_DIR}/architext.regular.ttf
+    DESTINATION ${CMAKE_BINARY_DIR}/Fonts
+)
+
 install(FILES ${imgui_SOURCE_DIR}/misc/fonts/Roboto-Medium.ttf fa-solid-900.ttf ${imgui_SOURCE_DIR}/misc/fonts/Cousine-Regular.ttf Lekton-Bold.ttf architext.regular.ttf
 	DESTINATION ${ORBITER_INSTALL_ROOT_DIR}/Fonts
 )

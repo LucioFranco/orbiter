@@ -53,11 +53,7 @@ if(ORBITER_BUILD_VULKANCLIENT)
 
 	set_target_properties(Vulkan.Headless PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${ORBITER_BINARY_ROOT_DIR}")
 
-	target_include_directories(Vulkan.Headless
-		PRIVATE ${Vulkan_INCLUDE_DIRS}
-		PRIVATE ${ORBITER_SOURCE_ROOT_DIR}/OVP/VulkanClient
-	)
-
+	# HeadlessRenderer provides PUBLIC include dirs for Vulkan, VulkanClient sources, and ImGui
 	target_link_libraries(Vulkan.Headless
 		HeadlessRenderer
 		Vulkan::Vulkan

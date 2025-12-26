@@ -781,7 +781,7 @@ HWND Orbiter::CreateRenderWindow (Config *pCfg, const char *scenario)
 
 	g_focusobj = 0;
 	Vessel *vfocus = g_psys->GetVessel (pState->Focus());
-	if (!vfocus)
+	if (!vfocus && g_psys->nVessel() > 0)
 		vfocus = g_psys->GetVessel ((DWORD)0); // in case no focus vessel was defined
 	SetFocusObject (vfocus, false);
 

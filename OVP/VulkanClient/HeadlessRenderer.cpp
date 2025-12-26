@@ -8,7 +8,19 @@
 #include "HeadlessRenderer.h"
 #include <cstring>
 #include <iostream>
-#include <algorithm>
+
+// ImGui includes
+// HeadlessRenderer uses its own copy of ImGui (not Orbiter's shared context)
+// We need to define GImGui here because imconfig.h prevents imgui.cpp from defining it
+struct ImGuiContext;
+#ifdef EXPORT_IMGUI_CONTEXT
+__declspec(dllexport) ImGuiContext* GImGui = nullptr;
+#else
+ImGuiContext* GImGui = nullptr;
+#endif
+
+#include <imgui.h>
+#include <backends/imgui_impl_vulkan.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -52,35 +64,10 @@ struct RENDERDOC_API_1_6_0 {
 typedef int (*pRENDERDOC_GetAPI)(uint32_t version, void** outAPIPointers);
 #define RENDERDOC_API_VERSION_1_6_0 10600
 
-// Validation layers
-static const char* validationLayers[] = {
-    "VK_LAYER_KHRONOS_validation"
-};
-
-#ifdef _DEBUG
-static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-    VkDebugUtilsMessageTypeFlagsEXT messageType,
-    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-    void* pUserData)
-{
-    if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        std::cerr << "[Vulkan] " << pCallbackData->pMessage << std::endl;
-    }
-    return VK_FALSE;
-}
-#endif
-
 HeadlessRenderer::HeadlessRenderer()
     : m_initialized(false)
     , m_width(0)
     , m_height(0)
-    , m_instance(VK_NULL_HANDLE)
-    , m_physicalDevice(VK_NULL_HANDLE)
-    , m_device(VK_NULL_HANDLE)
-    , m_queue(VK_NULL_HANDLE)
-    , m_queueFamilyIndex(0)
-    , m_commandPool(VK_NULL_HANDLE)
     , m_commandBuffer(VK_NULL_HANDLE)
     , m_colorImage(VK_NULL_HANDLE)
     , m_colorMemory(VK_NULL_HANDLE)
@@ -93,10 +80,9 @@ HeadlessRenderer::HeadlessRenderer()
     , m_stagingSize(0)
     , m_renderDocModule(nullptr)
     , m_renderDocApi(nullptr)
-#ifdef _DEBUG
-    , m_debugMessenger(VK_NULL_HANDLE)
-    , m_enableValidation(true)
-#endif
+    , m_imguiDescriptorPool(VK_NULL_HANDLE)
+    , m_imguiInitialized(false)
+    , m_renderPassStarted(false)
 {
     m_clearColor[0] = 0.0f;
     m_clearColor[1] = 0.0f;
@@ -123,30 +109,18 @@ bool HeadlessRenderer::Init(uint32_t width, uint32_t height)
     // Load RenderDoc first (before Vulkan instance)
     LoadRenderDoc();
 
-    if (!CreateInstance()) {
-        std::cerr << "[HeadlessRenderer] Failed to create Vulkan instance" << std::endl;
+    // Initialize shared Vulkan context (headless mode - no surface)
+    VulkanContextCreateInfo ctxInfo{};
+    ctxInfo.appName = "HeadlessRenderer";
+    ctxInfo.enableValidation = true;
+    ctxInfo.enableSurface = false;
+
+    if (!m_ctx.Init(ctxInfo)) {
+        std::cerr << "[HeadlessRenderer] Failed to initialize Vulkan context" << std::endl;
         return false;
     }
-    std::cout << "[API] Instance created: OK" << std::endl;
 
-    if (!PickPhysicalDevice()) {
-        std::cerr << "[HeadlessRenderer] Failed to find suitable GPU" << std::endl;
-        return false;
-    }
-    std::cout << "[API] Physical device found: OK (" << GetGPUName() << ")" << std::endl;
-
-    if (!CreateLogicalDevice()) {
-        std::cerr << "[HeadlessRenderer] Failed to create logical device" << std::endl;
-        return false;
-    }
-    std::cout << "[API] Logical device created: OK" << std::endl;
-
-    if (!CreateCommandPool()) {
-        std::cerr << "[HeadlessRenderer] Failed to create command pool" << std::endl;
-        return false;
-    }
-    std::cout << "[API] Command pool created: OK" << std::endl;
-
+    // Create renderer-specific resources
     if (!CreateColorImage()) {
         std::cerr << "[HeadlessRenderer] Failed to create color image" << std::endl;
         return false;
@@ -185,17 +159,21 @@ bool HeadlessRenderer::Init(uint32_t width, uint32_t height)
 
 void HeadlessRenderer::Shutdown()
 {
-    if (m_device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(m_device);
-    }
+    m_ctx.WaitIdle();
+
+    // Shutdown ImGui first (before destroying Vulkan resources)
+    ShutdownImGui();
 
     DestroyFramebuffer();
     DestroyRenderPass();
     DestroyStagingBuffer();
     DestroyColorImage();
-    DestroyCommandPool();
-    DestroyLogicalDevice();
-    DestroyInstance();
+
+    // Command buffer is freed when command pool is destroyed
+    m_commandBuffer = VK_NULL_HANDLE;
+
+    // Shutdown shared context (destroys command pool, device, instance)
+    m_ctx.Shutdown();
 
     m_renderDocApi = nullptr;
     m_renderDocModule = nullptr;
@@ -205,112 +183,10 @@ void HeadlessRenderer::Shutdown()
     m_height = 0;
 }
 
-bool HeadlessRenderer::CreateInstance()
-{
-    VkApplicationInfo appInfo{};
-    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = "HeadlessRenderer";
-    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "Orbiter VulkanClient";
-    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
-
-    VkInstanceCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    createInfo.pApplicationInfo = &appInfo;
-
-#ifdef _DEBUG
-    if (m_enableValidation) {
-        createInfo.enabledLayerCount = 1;
-        createInfo.ppEnabledLayerNames = validationLayers;
-
-        const char* extensions[] = { VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
-        createInfo.enabledExtensionCount = 1;
-        createInfo.ppEnabledExtensionNames = extensions;
-    }
-#endif
-
-    VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
-    return result == VK_SUCCESS;
-}
-
-bool HeadlessRenderer::PickPhysicalDevice()
-{
-    uint32_t deviceCount = 0;
-    vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
-
-    if (deviceCount == 0) {
-        return false;
-    }
-
-    std::vector<VkPhysicalDevice> devices(deviceCount);
-    vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
-
-    // Find a device with graphics queue
-    for (const auto& device : devices) {
-        uint32_t queueFamilyCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
-
-        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
-
-        for (uint32_t i = 0; i < queueFamilyCount; i++) {
-            if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-                m_physicalDevice = device;
-                m_queueFamilyIndex = i;
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-bool HeadlessRenderer::CreateLogicalDevice()
-{
-    float queuePriority = 1.0f;
-
-    VkDeviceQueueCreateInfo queueCreateInfo{};
-    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueCreateInfo.queueFamilyIndex = m_queueFamilyIndex;
-    queueCreateInfo.queueCount = 1;
-    queueCreateInfo.pQueuePriorities = &queuePriority;
-
-    VkPhysicalDeviceFeatures deviceFeatures{};
-
-    VkDeviceCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    createInfo.queueCreateInfoCount = 1;
-    createInfo.pQueueCreateInfos = &queueCreateInfo;
-    createInfo.pEnabledFeatures = &deviceFeatures;
-
-#ifdef _DEBUG
-    if (m_enableValidation) {
-        createInfo.enabledLayerCount = 1;
-        createInfo.ppEnabledLayerNames = validationLayers;
-    }
-#endif
-
-    if (vkCreateDevice(m_physicalDevice, &createInfo, nullptr, &m_device) != VK_SUCCESS) {
-        return false;
-    }
-
-    vkGetDeviceQueue(m_device, m_queueFamilyIndex, 0, &m_queue);
-    return true;
-}
-
-bool HeadlessRenderer::CreateCommandPool()
-{
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = m_queueFamilyIndex;
-
-    return vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_commandPool) == VK_SUCCESS;
-}
-
 bool HeadlessRenderer::CreateColorImage()
 {
+    VkDevice device = m_ctx.GetDevice();
+
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -323,23 +199,23 @@ bool HeadlessRenderer::CreateColorImage()
     imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(m_device, &imageInfo, nullptr, &m_colorImage) != VK_SUCCESS) {
+    if (vkCreateImage(device, &imageInfo, nullptr, &m_colorImage) != VK_SUCCESS) {
         return false;
     }
 
     VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(m_device, m_colorImage, &memReqs);
+    vkGetImageMemoryRequirements(device, m_colorImage, &memReqs);
 
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    allocInfo.memoryTypeIndex = m_ctx.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (vkAllocateMemory(m_device, &allocInfo, nullptr, &m_colorMemory) != VK_SUCCESS) {
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &m_colorMemory) != VK_SUCCESS) {
         return false;
     }
 
-    vkBindImageMemory(m_device, m_colorImage, m_colorMemory, 0);
+    vkBindImageMemory(device, m_colorImage, m_colorMemory, 0);
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -353,11 +229,13 @@ bool HeadlessRenderer::CreateColorImage()
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount = 1;
 
-    return vkCreateImageView(m_device, &viewInfo, nullptr, &m_colorImageView) == VK_SUCCESS;
+    return vkCreateImageView(device, &viewInfo, nullptr, &m_colorImageView) == VK_SUCCESS;
 }
 
 bool HeadlessRenderer::CreateStagingBuffer()
 {
+    VkDevice device = m_ctx.GetDevice();
+
     m_stagingSize = m_width * m_height * 4; // RGBA
 
     VkBufferCreateInfo bufferInfo{};
@@ -365,24 +243,24 @@ bool HeadlessRenderer::CreateStagingBuffer()
     bufferInfo.size = m_stagingSize;
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-    if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &m_stagingBuffer) != VK_SUCCESS) {
+    if (vkCreateBuffer(device, &bufferInfo, nullptr, &m_stagingBuffer) != VK_SUCCESS) {
         return false;
     }
 
     VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(m_device, m_stagingBuffer, &memReqs);
+    vkGetBufferMemoryRequirements(device, m_stagingBuffer, &memReqs);
 
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
+    allocInfo.memoryTypeIndex = m_ctx.FindMemoryType(memReqs.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-    if (vkAllocateMemory(m_device, &allocInfo, nullptr, &m_stagingMemory) != VK_SUCCESS) {
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &m_stagingMemory) != VK_SUCCESS) {
         return false;
     }
 
-    return vkBindBufferMemory(m_device, m_stagingBuffer, m_stagingMemory, 0) == VK_SUCCESS;
+    return vkBindBufferMemory(device, m_stagingBuffer, m_stagingMemory, 0) == VK_SUCCESS;
 }
 
 bool HeadlessRenderer::CreateRenderPass()
@@ -413,7 +291,7 @@ bool HeadlessRenderer::CreateRenderPass()
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
 
-    return vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_renderPass) == VK_SUCCESS;
+    return vkCreateRenderPass(m_ctx.GetDevice(), &renderPassInfo, nullptr, &m_renderPass) == VK_SUCCESS;
 }
 
 bool HeadlessRenderer::CreateFramebuffer()
@@ -427,32 +305,18 @@ bool HeadlessRenderer::CreateFramebuffer()
     fbInfo.height = m_height;
     fbInfo.layers = 1;
 
-    return vkCreateFramebuffer(m_device, &fbInfo, nullptr, &m_framebuffer) == VK_SUCCESS;
+    return vkCreateFramebuffer(m_ctx.GetDevice(), &fbInfo, nullptr, &m_framebuffer) == VK_SUCCESS;
 }
 
 bool HeadlessRenderer::AllocateCommandBuffer()
 {
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = m_commandPool;
+    allocInfo.commandPool = m_ctx.GetCommandPool();
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = 1;
 
-    return vkAllocateCommandBuffers(m_device, &allocInfo, &m_commandBuffer) == VK_SUCCESS;
-}
-
-uint32_t HeadlessRenderer::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
-{
-    VkPhysicalDeviceMemoryProperties memProps;
-    vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProps);
-
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-
-    return 0;
+    return vkAllocateCommandBuffers(m_ctx.GetDevice(), &allocInfo, &m_commandBuffer) == VK_SUCCESS;
 }
 
 void HeadlessRenderer::BeginFrame()
@@ -464,6 +328,8 @@ void HeadlessRenderer::BeginFrame()
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
     vkBeginCommandBuffer(m_commandBuffer, &beginInfo);
+
+    m_renderPassStarted = false;
 }
 
 void HeadlessRenderer::Clear(float r, float g, float b, float a)
@@ -476,20 +342,26 @@ void HeadlessRenderer::Clear(float r, float g, float b, float a)
 
 void HeadlessRenderer::EndFrame()
 {
-    VkClearValue clearValue{};
-    clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+    // Start render pass if not already started (e.g., by ImGui)
+    if (!m_renderPassStarted) {
+        VkClearValue clearValue{};
+        clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
 
-    VkRenderPassBeginInfo rpBegin{};
-    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rpBegin.renderPass = m_renderPass;
-    rpBegin.framebuffer = m_framebuffer;
-    rpBegin.renderArea.offset = { 0, 0 };
-    rpBegin.renderArea.extent = { m_width, m_height };
-    rpBegin.clearValueCount = 1;
-    rpBegin.pClearValues = &clearValue;
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = 1;
+        rpBegin.pClearValues = &clearValue;
 
-    vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
     vkCmdEndRenderPass(m_commandBuffer);
+    m_renderPassStarted = false;
 
     vkEndCommandBuffer(m_commandBuffer);
 }
@@ -501,13 +373,14 @@ void HeadlessRenderer::Submit()
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &m_commandBuffer;
 
-    vkQueueSubmit(m_queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_queue);
+    vkQueueSubmit(m_ctx.GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_ctx.GetGraphicsQueue());
 }
 
 std::vector<uint8_t> HeadlessRenderer::ReadPixels()
 {
     std::vector<uint8_t> pixels(m_width * m_height * 4);
+    VkDevice device = m_ctx.GetDevice();
 
     // Record copy command
     VkCommandBufferBeginInfo beginInfo{};
@@ -538,14 +411,14 @@ std::vector<uint8_t> HeadlessRenderer::ReadPixels()
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &m_commandBuffer;
 
-    vkQueueSubmit(m_queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_queue);
+    vkQueueSubmit(m_ctx.GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_ctx.GetGraphicsQueue());
 
     // Map and copy
     void* data;
-    vkMapMemory(m_device, m_stagingMemory, 0, m_stagingSize, 0, &data);
+    vkMapMemory(device, m_stagingMemory, 0, m_stagingSize, 0, &data);
     memcpy(pixels.data(), data, pixels.size());
-    vkUnmapMemory(m_device, m_stagingMemory);
+    vkUnmapMemory(device, m_stagingMemory);
 
     return pixels;
 }
@@ -604,17 +477,6 @@ uint32_t HeadlessRenderer::GetCaptureCount() const
     return 0;
 }
 
-std::string HeadlessRenderer::GetGPUName() const
-{
-    if (m_physicalDevice == VK_NULL_HANDLE) {
-        return "Unknown";
-    }
-
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
-    return props.deviceName;
-}
-
 void HeadlessRenderer::PrintDiagnostics()
 {
     std::cout << "\n=== HEADLESS RENDERER DIAGNOSTICS ===" << std::endl;
@@ -631,79 +493,190 @@ void HeadlessRenderer::PrintDiagnostics()
 // Cleanup functions
 void HeadlessRenderer::DestroyFramebuffer()
 {
-    if (m_framebuffer && m_device) {
-        vkDestroyFramebuffer(m_device, m_framebuffer, nullptr);
+    VkDevice device = m_ctx.GetDevice();
+    if (m_framebuffer != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, m_framebuffer, nullptr);
         m_framebuffer = VK_NULL_HANDLE;
     }
 }
 
 void HeadlessRenderer::DestroyRenderPass()
 {
-    if (m_renderPass && m_device) {
-        vkDestroyRenderPass(m_device, m_renderPass, nullptr);
+    VkDevice device = m_ctx.GetDevice();
+    if (m_renderPass != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, m_renderPass, nullptr);
         m_renderPass = VK_NULL_HANDLE;
     }
 }
 
 void HeadlessRenderer::DestroyStagingBuffer()
 {
-    if (m_stagingBuffer && m_device) {
-        vkDestroyBuffer(m_device, m_stagingBuffer, nullptr);
+    VkDevice device = m_ctx.GetDevice();
+    if (m_stagingBuffer != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, m_stagingBuffer, nullptr);
         m_stagingBuffer = VK_NULL_HANDLE;
     }
-    if (m_stagingMemory && m_device) {
-        vkFreeMemory(m_device, m_stagingMemory, nullptr);
+    if (m_stagingMemory != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkFreeMemory(device, m_stagingMemory, nullptr);
         m_stagingMemory = VK_NULL_HANDLE;
     }
 }
 
 void HeadlessRenderer::DestroyColorImage()
 {
-    if (m_colorImageView && m_device) {
-        vkDestroyImageView(m_device, m_colorImageView, nullptr);
+    VkDevice device = m_ctx.GetDevice();
+    if (m_colorImageView != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, m_colorImageView, nullptr);
         m_colorImageView = VK_NULL_HANDLE;
     }
-    if (m_colorImage && m_device) {
-        vkDestroyImage(m_device, m_colorImage, nullptr);
+    if (m_colorImage != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkDestroyImage(device, m_colorImage, nullptr);
         m_colorImage = VK_NULL_HANDLE;
     }
-    if (m_colorMemory && m_device) {
-        vkFreeMemory(m_device, m_colorMemory, nullptr);
+    if (m_colorMemory != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkFreeMemory(device, m_colorMemory, nullptr);
         m_colorMemory = VK_NULL_HANDLE;
     }
 }
 
-void HeadlessRenderer::DestroyCommandPool()
+// ======================================================================
+// ImGui integration
+// ======================================================================
+
+bool HeadlessRenderer::InitImGui()
 {
-    if (m_commandPool && m_device) {
-        vkDestroyCommandPool(m_device, m_commandPool, nullptr);
-        m_commandPool = VK_NULL_HANDLE;
+    if (m_imguiInitialized) {
+        return true;
     }
+
+    if (!m_initialized) {
+        std::cerr << "[HeadlessRenderer] Cannot init ImGui - renderer not initialized" << std::endl;
+        return false;
+    }
+
+    std::cout << "[HeadlessRenderer] Initializing ImGui..." << std::endl;
+
+    // Create ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    // Set display size for headless rendering
+    io.DisplaySize = ImVec2(static_cast<float>(m_width), static_cast<float>(m_height));
+    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+
+    // Initialize style
+    ImGui::StyleColorsDark();
+
+    // Create descriptor pool for ImGui
+    VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 }
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 100;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes;
+
+    if (vkCreateDescriptorPool(m_ctx.GetDevice(), &poolInfo, nullptr, &m_imguiDescriptorPool) != VK_SUCCESS) {
+        std::cerr << "[HeadlessRenderer] Failed to create ImGui descriptor pool" << std::endl;
+        ImGui::DestroyContext();
+        return false;
+    }
+
+    // Initialize ImGui for Vulkan
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.ApiVersion = VK_API_VERSION_1_0;
+    initInfo.Instance = m_ctx.GetInstance();
+    initInfo.PhysicalDevice = m_ctx.GetPhysicalDevice();
+    initInfo.Device = m_ctx.GetDevice();
+    initInfo.QueueFamily = m_ctx.GetGraphicsQueueFamily();
+    initInfo.Queue = m_ctx.GetGraphicsQueue();
+    initInfo.DescriptorPool = m_imguiDescriptorPool;
+    initInfo.MinImageCount = 2;
+    initInfo.ImageCount = 2;
+    initInfo.PipelineInfoMain.RenderPass = m_renderPass;
+    initInfo.PipelineInfoMain.Subpass = 0;
+    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+    if (!ImGui_ImplVulkan_Init(&initInfo)) {
+        std::cerr << "[HeadlessRenderer] Failed to initialize ImGui Vulkan backend" << std::endl;
+        vkDestroyDescriptorPool(m_ctx.GetDevice(), m_imguiDescriptorPool, nullptr);
+        m_imguiDescriptorPool = VK_NULL_HANDLE;
+        ImGui::DestroyContext();
+        return false;
+    }
+
+    m_imguiInitialized = true;
+    std::cout << "[HeadlessRenderer] ImGui initialized successfully" << std::endl;
+
+    return true;
 }
 
-void HeadlessRenderer::DestroyLogicalDevice()
+void HeadlessRenderer::ShutdownImGui()
 {
-    if (m_device) {
-        vkDestroyDevice(m_device, nullptr);
-        m_device = VK_NULL_HANDLE;
+    if (!m_imguiInitialized) {
+        return;
     }
+
+    m_ctx.WaitIdle();
+
+    ImGui_ImplVulkan_Shutdown();
+
+    if (m_imguiDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_ctx.GetDevice(), m_imguiDescriptorPool, nullptr);
+        m_imguiDescriptorPool = VK_NULL_HANDLE;
+    }
+
+    ImGui::DestroyContext();
+
+    m_imguiInitialized = false;
+    std::cout << "[HeadlessRenderer] ImGui shutdown complete" << std::endl;
 }
 
-void HeadlessRenderer::DestroyInstance()
+void HeadlessRenderer::ImGuiNewFrame()
 {
-#ifdef _DEBUG
-    if (m_debugMessenger && m_instance) {
-        auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
-            m_instance, "vkDestroyDebugUtilsMessengerEXT");
-        if (func) {
-            func(m_instance, m_debugMessenger, nullptr);
-        }
-        m_debugMessenger = VK_NULL_HANDLE;
+    if (!m_imguiInitialized) {
+        return;
     }
-#endif
 
-    if (m_instance) {
-        vkDestroyInstance(m_instance, nullptr);
-        m_instance = VK_NULL_HANDLE;
+    ImGui_ImplVulkan_NewFrame();
+
+    // For headless, we simulate the platform NewFrame
+    ImGuiIO& io = ImGui::GetIO();
+    io.DeltaTime = 1.0f / 60.0f;  // Assume 60 FPS
+
+    ImGui::NewFrame();
+}
+
+void HeadlessRenderer::ImGuiRender()
+{
+    if (!m_imguiInitialized) {
+        return;
     }
+
+    // Start render pass if not already started
+    if (!m_renderPassStarted) {
+        VkClearValue clearValue{};
+        clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = 1;
+        rpBegin.pClearValues = &clearValue;
+
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
+    ImGui::Render();
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), m_commandBuffer);
 }

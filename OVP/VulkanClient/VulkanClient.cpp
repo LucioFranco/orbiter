@@ -10,52 +10,11 @@
 #include "VulkanClient.h"
 #include "OrbiterAPI.h"
 #include <vulkan/vulkan_win32.h>
-#include <cstring>
 
-// Validation layers for debug builds
-static const std::vector<const char*> validationLayers = {
-    "VK_LAYER_KHRONOS_validation"
-};
-
-#ifdef _DEBUG
-static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-    VkDebugUtilsMessageTypeFlagsEXT messageType,
-    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-    void* pUserData)
-{
-    if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        oapiWriteLog(const_cast<char*>(pCallbackData->pMessage));
-    }
-    return VK_FALSE;
-}
-
-static VkResult CreateDebugUtilsMessengerEXT(
-    VkInstance instance,
-    const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
-    const VkAllocationCallbacks* pAllocator,
-    VkDebugUtilsMessengerEXT* pDebugMessenger)
-{
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
-        instance, "vkCreateDebugUtilsMessengerEXT");
-    if (func != nullptr) {
-        return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-    }
-    return VK_ERROR_EXTENSION_NOT_PRESENT;
-}
-
-static void DestroyDebugUtilsMessengerEXT(
-    VkInstance instance,
-    VkDebugUtilsMessengerEXT debugMessenger,
-    const VkAllocationCallbacks* pAllocator)
-{
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
-        instance, "vkDestroyDebugUtilsMessengerEXT");
-    if (func != nullptr) {
-        func(instance, debugMessenger, pAllocator);
-    }
-}
-#endif
+// ImGui includes
+#include <imgui.h>
+#include <backends/imgui_impl_vulkan.h>
+#include <backends/imgui_impl_win32.h>
 
 // ======================================================================
 // Module interface
@@ -87,19 +46,34 @@ DLLCLBK void ExitModule(HINSTANCE hDLL)
 
 VulkanClient::VulkanClient(HINSTANCE hInstance)
     : GraphicsClient(hInstance)
-    , m_instance(VK_NULL_HANDLE)
-#ifdef _DEBUG
-    , m_debugMessenger(VK_NULL_HANDLE)
-    , m_enableValidationLayers(true)
-#else
-    , m_enableValidationLayers(false)
-#endif
+    , m_surface(VK_NULL_HANDLE)
+    , m_viewportWidth(1920)
+    , m_viewportHeight(1080)
+    , m_imguiDescriptorPool(VK_NULL_HANDLE)
+    , m_imguiInitialized(false)
+    , m_frameInProgress(false)
 {
+    for (uint32_t i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++) {
+        m_commandBuffers[i] = VK_NULL_HANDLE;
+    }
+
+    // Cornflower blue - a nice visible color
+    m_clearColor[0] = 0.392f;
+    m_clearColor[1] = 0.584f;
+    m_clearColor[2] = 0.929f;
+    m_clearColor[3] = 1.0f;
 }
 
 VulkanClient::~VulkanClient()
 {
-    DestroyInstance();
+    m_swapchain.Shutdown();
+
+    if (m_surface != VK_NULL_HANDLE && m_ctx.GetInstance() != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(m_ctx.GetInstance(), m_surface, nullptr);
+        m_surface = VK_NULL_HANDLE;
+    }
+
+    m_ctx.Shutdown();
 }
 
 bool VulkanClient::clbkInitialise()
@@ -109,177 +83,464 @@ bool VulkanClient::clbkInitialise()
         return false;
     }
 
-    oapiWriteLog(const_cast<char*>("VulkanClient: Initializing..."));
+    oapiWriteLog(const_cast<char*>("VulkanClient: Initializing (launchpad phase)..."));
 
-    if (!CreateInstance()) {
-        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to create Vulkan instance"));
-        return false;
-    }
+    // Note: We defer Vulkan context creation until clbkCreateRenderWindow()
+    // because we need a window surface to properly select a GPU with present support.
 
-#ifdef _DEBUG
-    if (m_enableValidationLayers) {
-        if (!SetupDebugMessenger()) {
-            oapiWriteLog(const_cast<char*>("VulkanClient: Warning - Failed to set up debug messenger"));
-        }
-    }
-#endif
-
-    oapiWriteLog(const_cast<char*>("VulkanClient: Vulkan instance created successfully"));
+    oapiWriteLog(const_cast<char*>("VulkanClient: Initialization complete"));
     return true;
 }
 
-bool VulkanClient::CreateInstance()
+HWND VulkanClient::clbkCreateRenderWindow()
 {
-    if (m_enableValidationLayers && !CheckValidationLayerSupport()) {
-        oapiWriteLog(const_cast<char*>("VulkanClient: Validation layers requested but not available"));
-        m_enableValidationLayers = false;
+    oapiWriteLog(const_cast<char*>("VulkanClient: Creating render window..."));
+
+    // Call base class to create the window
+    HWND hWnd = GraphicsClient::clbkCreateRenderWindow();
+    if (!hWnd) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to create window"));
+        return nullptr;
     }
 
-    VkApplicationInfo appInfo{};
-    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = "Orbiter Space Flight Simulator";
-    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "Orbiter VulkanClient";
-    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
+    // Set window title to indicate Vulkan is working
+    SetWindowText(hWnd, "[VulkanClient]");
 
-    VkInstanceCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    createInfo.pApplicationInfo = &appInfo;
+    // Get window size
+    RECT rect;
+    GetClientRect(hWnd, &rect);
+    m_viewportWidth = rect.right - rect.left;
+    m_viewportHeight = rect.bottom - rect.top;
 
-    auto extensions = GetRequiredExtensions();
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
-    createInfo.ppEnabledExtensionNames = extensions.data();
+    // Fill window with black to avoid white flash (like D3D9Client does)
+    HDC hDC = GetDC(hWnd);
+    HBRUSH hBr = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(hDC, &rect, hBr);
+    DeleteObject(hBr);
+    ReleaseDC(hWnd, hDC);
+    ValidateRect(hWnd, NULL);
 
-#ifdef _DEBUG
-    VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
-    if (m_enableValidationLayers) {
-        createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
-        createInfo.ppEnabledLayerNames = validationLayers.data();
+    // Ensure minimum window size for Vulkan
+    if (m_viewportWidth == 0) m_viewportWidth = 800;
+    if (m_viewportHeight == 0) m_viewportHeight = 600;
 
-        debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-        debugCreateInfo.messageSeverity =
-            VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        debugCreateInfo.messageType =
-            VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-            VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-        debugCreateInfo.pfnUserCallback = debugCallback;
-        createInfo.pNext = &debugCreateInfo;
-    } else {
-        createInfo.enabledLayerCount = 0;
-        createInfo.pNext = nullptr;
+    char buf[256];
+    sprintf_s(buf, "VulkanClient: Window created: %dx%d", m_viewportWidth, m_viewportHeight);
+    oapiWriteLog(buf);
+
+    // Initialize Vulkan context with surface extensions enabled
+    VulkanContextCreateInfo ctxInfo{};
+    ctxInfo.appName = "Orbiter Space Flight Simulator";
+    ctxInfo.enableValidation = false;  // Disabled for debugging crash
+    ctxInfo.enableSurface = true;
+
+    if (!m_ctx.Init(ctxInfo)) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to initialize Vulkan context"));
+        return nullptr;
     }
-#else
-    createInfo.enabledLayerCount = 0;
-    createInfo.pNext = nullptr;
-#endif
 
-    VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
-    if (result != VK_SUCCESS) {
-        char buf[256];
-        sprintf_s(buf, "VulkanClient: vkCreateInstance failed with error %d", result);
+    sprintf_s(buf, "VulkanClient: Using GPU: %s", m_ctx.GetGPUName().c_str());
+    oapiWriteLog(buf);
+
+    // Create Vulkan surface from window
+    VkWin32SurfaceCreateInfoKHR surfaceInfo{};
+    surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    surfaceInfo.hwnd = hWnd;
+    surfaceInfo.hinstance = GetModuleHandle(nullptr);
+
+    if (vkCreateWin32SurfaceKHR(m_ctx.GetInstance(), &surfaceInfo, nullptr, &m_surface) != VK_SUCCESS) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to create Vulkan surface"));
+        return nullptr;
+    }
+    oapiWriteLog(const_cast<char*>("VulkanClient: Vulkan surface created"));
+
+    // Initialize swapchain
+    if (!m_swapchain.Init(&m_ctx, m_surface, m_viewportWidth, m_viewportHeight)) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to initialize swapchain"));
+        return nullptr;
+    }
+    oapiWriteLog(const_cast<char*>("VulkanClient: Swapchain initialized"));
+
+    // Allocate command buffers
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = m_ctx.GetCommandPool();
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = VulkanSwapchain::MAX_FRAMES_IN_FLIGHT;
+
+    if (vkAllocateCommandBuffers(m_ctx.GetDevice(), &allocInfo, m_commandBuffers) != VK_SUCCESS) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to allocate command buffers"));
+        return nullptr;
+    }
+    oapiWriteLog(const_cast<char*>("VulkanClient: Command buffers allocated"));
+
+    oapiWriteLog(const_cast<char*>("VulkanClient: Render window ready"));
+    return hWnd;
+}
+
+void VulkanClient::clbkDestroyRenderWindow(bool fastclose)
+{
+    oapiWriteLog(const_cast<char*>("VulkanClient: Destroying render window..."));
+
+    m_ctx.WaitIdle();
+
+    // Command buffers are freed when command pool is destroyed
+    for (uint32_t i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++) {
+        m_commandBuffers[i] = VK_NULL_HANDLE;
+    }
+
+    m_swapchain.Shutdown();
+
+    if (m_surface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(m_ctx.GetInstance(), m_surface, nullptr);
+        m_surface = VK_NULL_HANDLE;
+    }
+
+    GraphicsClient::clbkDestroyRenderWindow(fastclose);
+}
+
+void VulkanClient::clbkRenderScene()
+{
+    static int frameCount = 0;
+    frameCount++;
+
+    // Log first 5 calls unconditionally to debug
+    if (frameCount <= 5) {
+        char buf[128];
+        sprintf(buf, "VulkanClient: clbkRenderScene called (frame %d, swapchain=%d)",
+            frameCount, m_swapchain.IsInitialized());
         oapiWriteLog(buf);
-        return false;
     }
 
-    return true;
-}
-
-void VulkanClient::DestroyInstance()
-{
-#ifdef _DEBUG
-    DestroyDebugMessenger();
-#endif
-
-    if (m_instance != VK_NULL_HANDLE) {
-        vkDestroyInstance(m_instance, nullptr);
-        m_instance = VK_NULL_HANDLE;
+    if (!m_swapchain.IsInitialized()) {
+        return;
     }
-}
 
-bool VulkanClient::CheckValidationLayerSupport()
-{
-    uint32_t layerCount;
-    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    // Acquire next swapchain image
+    if (!m_swapchain.AcquireNextImage()) {
+        // Swapchain needs recreation (window resized, etc.)
+        HWND hWnd = GetRenderWindow();
+        if (hWnd) {
+            RECT rect;
+            GetClientRect(hWnd, &rect);
+            uint32_t width = rect.right - rect.left;
+            uint32_t height = rect.bottom - rect.top;
 
-    std::vector<VkLayerProperties> availableLayers(layerCount);
-    vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
-
-    for (const char* layerName : validationLayers) {
-        bool layerFound = false;
-        for (const auto& layerProperties : availableLayers) {
-            if (strcmp(layerName, layerProperties.layerName) == 0) {
-                layerFound = true;
-                break;
+            if (width > 0 && height > 0) {
+                oapiWriteLog(const_cast<char*>("VulkanClient: Recreating swapchain"));
+                m_swapchain.Recreate(width, height);
+                m_viewportWidth = width;
+                m_viewportHeight = height;
             }
         }
-        if (!layerFound) {
-            return false;
-        }
+        return;
     }
+
+    if (frameCount == 1) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: First frame rendering"));
+    }
+
+    uint32_t frameIndex = m_swapchain.GetCurrentFrame();
+    VkCommandBuffer cmd = m_commandBuffers[frameIndex];
+
+    // Begin command buffer recording
+    vkResetCommandBuffer(cmd, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    // Begin render pass with clear color
+    VkClearValue clearValue{};
+    clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+
+    VkExtent2D extent = m_swapchain.GetExtent();
+
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass = m_swapchain.GetRenderPass();
+    rpBegin.framebuffer = m_swapchain.GetCurrentFramebuffer();
+    rpBegin.renderArea.offset = { 0, 0 };
+    rpBegin.renderArea.extent = extent;
+    rpBegin.clearValueCount = 1;
+    rpBegin.pClearValues = &clearValue;
+
+    vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    // Set viewport and scissor
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = extent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Mark frame as in progress - clbkDisplayFrame will check this
+    m_frameInProgress = true;
+
+    // Note: Render pass is left open for ImGui to render into
+    // It will be closed and submitted in clbkDisplayFrame()
+}
+
+bool VulkanClient::clbkDisplayFrame()
+{
+    static int displayCount = 0;
+    displayCount++;
+
+    // Log first 5 calls unconditionally to debug
+    if (displayCount <= 5) {
+        char buf[128];
+        sprintf(buf, "VulkanClient: clbkDisplayFrame called (frame %d, init=%d, inProgress=%d)",
+            displayCount, m_swapchain.IsInitialized(), m_frameInProgress);
+        oapiWriteLog(buf);
+    }
+
+    if (!m_swapchain.IsInitialized() || !m_frameInProgress) {
+        return true;  // Always return true - D3D9Client does this too
+    }
+
+    m_frameInProgress = false;
+
+    uint32_t frameIndex = m_swapchain.GetCurrentFrame();
+    VkCommandBuffer cmd = m_commandBuffers[frameIndex];
+
+    // End render pass and command buffer
+    vkCmdEndRenderPass(cmd);
+    vkEndCommandBuffer(cmd);
+
+    // Submit command buffer
+    VkSemaphore waitSemaphores[] = { m_swapchain.GetImageAvailableSemaphore() };
+    VkSemaphore signalSemaphores[] = { m_swapchain.GetRenderFinishedSemaphore() };
+    VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
+
+    vkQueueSubmit(m_ctx.GetGraphicsQueue(), 1, &submitInfo, m_swapchain.GetInFlightFence());
+
+    // Present
+    m_swapchain.Present();
+    m_swapchain.AdvanceFrame();
 
     return true;
 }
 
-std::vector<const char*> VulkanClient::GetRequiredExtensions()
+void VulkanClient::RecordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
 {
-    std::vector<const char*> extensions;
+    vkResetCommandBuffer(cmd, 0);
 
-    // Required for windowed rendering on Windows
-    extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-    extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-#ifdef _DEBUG
-    if (m_enableValidationLayers) {
-        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    }
-#endif
+    vkBeginCommandBuffer(cmd, &beginInfo);
 
-    return extensions;
+    VkClearValue clearValue{};
+    clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+
+    VkExtent2D extent = m_swapchain.GetExtent();
+
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass = m_swapchain.GetRenderPass();
+    rpBegin.framebuffer = m_swapchain.GetCurrentFramebuffer();
+    rpBegin.renderArea.offset = { 0, 0 };
+    rpBegin.renderArea.extent = extent;
+    rpBegin.clearValueCount = 1;
+    rpBegin.pClearValues = &clearValue;
+
+    vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    // Set viewport and scissor
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = extent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Future: Draw calls go here
+
+    vkCmdEndRenderPass(cmd);
+
+    vkEndCommandBuffer(cmd);
 }
-
-#ifdef _DEBUG
-bool VulkanClient::SetupDebugMessenger()
-{
-    if (!m_enableValidationLayers) return true;
-
-    VkDebugUtilsMessengerCreateInfoEXT createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-    createInfo.messageSeverity =
-        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-    createInfo.messageType =
-        VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-    createInfo.pfnUserCallback = debugCallback;
-
-    return CreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) == VK_SUCCESS;
-}
-
-void VulkanClient::DestroyDebugMessenger()
-{
-    if (m_debugMessenger != VK_NULL_HANDLE && m_instance != VK_NULL_HANDLE) {
-        DestroyDebugUtilsMessengerEXT(m_instance, m_debugMessenger, nullptr);
-        m_debugMessenger = VK_NULL_HANDLE;
-    }
-}
-#endif
 
 void VulkanClient::clbkGetViewportSize(DWORD *width, DWORD *height) const
 {
-    // TODO: Return actual viewport size when rendering is implemented
-    *width = 1920;
-    *height = 1080;
+    *width = m_viewportWidth;
+    *height = m_viewportHeight;
 }
 
 bool VulkanClient::clbkGetRenderParam(DWORD param, DWORD *value) const
 {
-    // TODO: Implement render parameter queries
-    *value = 0;
-    return false;
+    switch (param) {
+        case RP_COLOURDEPTH:
+            *value = 32;  // BGRA8
+            return true;
+        case RP_ZBUFFERDEPTH:
+            *value = 24;  // D24S8
+            return true;
+        case RP_STENCILDEPTH:
+            *value = 8;   // D24S8
+            return true;
+        case RP_MAXLIGHTS:
+            *value = 8;   // Reasonable default
+            return true;
+        case RP_ISTLDEVICE:
+            *value = 1;   // Yes, we support T&L
+            return true;
+        case RP_REQUIRETEXPOW2:
+            *value = 0;   // No, Vulkan doesn't require power-of-2 textures
+            return true;
+        default:
+            *value = 0;
+            return false;
+    }
+}
+
+// ======================================================================
+// ImGui implementation
+// ======================================================================
+
+// Callback for ImGui multi-viewport support - creates VkSurface for secondary windows
+// This is needed because imgui_impl_win32.cpp doesn't include Vulkan headers
+static int ImGui_ImplWin32_CreateVkSurface(ImGuiViewport* viewport, ImU64 vk_instance, const void* vk_allocator, ImU64* out_vk_surface)
+{
+    VkWin32SurfaceCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    createInfo.hwnd = (HWND)viewport->PlatformHandleRaw;
+    createInfo.hinstance = ::GetModuleHandle(nullptr);
+    return (int)vkCreateWin32SurfaceKHR((VkInstance)vk_instance, &createInfo, (VkAllocationCallbacks*)vk_allocator, (VkSurfaceKHR*)out_vk_surface);
+}
+
+void VulkanClient::clbkImGuiInit()
+{
+    if (m_imguiInitialized) {
+        return;
+    }
+
+    oapiWriteLog(const_cast<char*>("VulkanClient: Initializing ImGui..."));
+
+    // Create descriptor pool for ImGui
+    VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 }
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 100;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes;
+
+    if (vkCreateDescriptorPool(m_ctx.GetDevice(), &poolInfo, nullptr, &m_imguiDescriptorPool) != VK_SUCCESS) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to create ImGui descriptor pool"));
+        return;
+    }
+
+    // Note: Orbiter's DialogManager handles ImGui_ImplWin32_Init() before calling us
+    // We only need to initialize the Vulkan backend
+
+    // Set up the callback for creating VkSurface objects for multi-viewport support
+    // This must be done after ImGui_ImplWin32_Init and before ImGui_ImplVulkan_Init
+    ImGui::GetPlatformIO().Platform_CreateVkSurface = ImGui_ImplWin32_CreateVkSurface;
+
+    // Initialize ImGui for Vulkan
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.ApiVersion = VK_API_VERSION_1_0;
+    initInfo.Instance = m_ctx.GetInstance();
+    initInfo.PhysicalDevice = m_ctx.GetPhysicalDevice();
+    initInfo.Device = m_ctx.GetDevice();
+    initInfo.QueueFamily = m_ctx.GetGraphicsQueueFamily();
+    initInfo.Queue = m_ctx.GetGraphicsQueue();
+    initInfo.DescriptorPool = m_imguiDescriptorPool;
+    initInfo.MinImageCount = 2;
+    initInfo.ImageCount = m_swapchain.GetImageCount();
+    initInfo.PipelineInfoMain.RenderPass = m_swapchain.GetRenderPass();
+    initInfo.PipelineInfoMain.Subpass = 0;
+    initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+    if (!ImGui_ImplVulkan_Init(&initInfo)) {
+        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to initialize ImGui Vulkan"));
+        return;
+    }
+
+    m_imguiInitialized = true;
+    oapiWriteLog(const_cast<char*>("VulkanClient: ImGui initialized successfully"));
+}
+
+void VulkanClient::clbkImGuiShutdown()
+{
+    if (!m_imguiInitialized) {
+        return;
+    }
+
+    oapiWriteLog(const_cast<char*>("VulkanClient: Shutting down ImGui..."));
+
+    m_ctx.WaitIdle();
+
+    // Note: Orbiter's DialogManager handles ImGui_ImplWin32_Shutdown() after calling us
+    ImGui_ImplVulkan_Shutdown();
+
+    if (m_imguiDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_ctx.GetDevice(), m_imguiDescriptorPool, nullptr);
+        m_imguiDescriptorPool = VK_NULL_HANDLE;
+    }
+
+    m_imguiInitialized = false;
+    oapiWriteLog(const_cast<char*>("VulkanClient: ImGui shutdown complete"));
+}
+
+void VulkanClient::clbkImGuiNewFrame()
+{
+    if (!m_imguiInitialized) {
+        return;
+    }
+
+    // Note: Orbiter's DialogManager handles ImGui_ImplWin32_NewFrame() after calling us
+    ImGui_ImplVulkan_NewFrame();
+}
+
+void VulkanClient::clbkImGuiRenderDrawData()
+{
+    if (!m_imguiInitialized || !m_frameInProgress) {
+        return;
+    }
+
+    ImGui::Render();
+
+    uint32_t frameIndex = m_swapchain.GetCurrentFrame();
+    VkCommandBuffer cmd = m_commandBuffers[frameIndex];
+
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+
+    // Update and Render additional Platform Windows (required when ViewportsEnable is set)
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+    }
 }

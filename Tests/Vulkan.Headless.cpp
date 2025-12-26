@@ -8,6 +8,7 @@
 // ==============================================================
 
 #include "../OVP/VulkanClient/HeadlessRenderer.h"
+#include <imgui.h>
 #include <cmath>
 #include <algorithm>
 
@@ -276,6 +277,162 @@ TEST_CASE("HeadlessRenderer diagnostics", "[Vulkan][Headless]")
     std::string gpuName = renderer.GetGPUName();
     INFO("GPU: " << gpuName);
     REQUIRE(!gpuName.empty());
+
+    renderer.Shutdown();
+}
+
+// ======================================================================
+// ImGui Integration Tests
+// ======================================================================
+
+TEST_CASE("HeadlessRenderer ImGui initialization", "[Vulkan][Headless][ImGui]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+
+    SECTION("Basic ImGui initialization") {
+        REQUIRE(!renderer.IsImGuiInitialized());
+
+        REQUIRE(renderer.InitImGui());
+        REQUIRE(renderer.IsImGuiInitialized());
+
+        // Verify ImGui context exists
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        REQUIRE(ctx != nullptr);
+
+        renderer.ShutdownImGui();
+        REQUIRE(!renderer.IsImGuiInitialized());
+    }
+
+    SECTION("Double initialization is safe") {
+        REQUIRE(renderer.InitImGui());
+        REQUIRE(renderer.InitImGui());  // Should return true without error
+        REQUIRE(renderer.IsImGuiInitialized());
+    }
+
+    SECTION("Shutdown without init is safe") {
+        renderer.ShutdownImGui();  // Should not crash
+        REQUIRE(!renderer.IsImGuiInitialized());
+    }
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("HeadlessRenderer ImGui frame cycle", "[Vulkan][Headless][ImGui]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitImGui());
+
+    SECTION("Empty frame") {
+        renderer.BeginFrame();
+        renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+
+        renderer.ImGuiNewFrame();
+        // No widgets - just start and end frame
+        renderer.ImGuiRender();
+
+        renderer.EndFrame();
+        renderer.Submit();
+
+        auto pixels = renderer.ReadPixels();
+        REQUIRE(!pixels.empty());
+
+        // Should be cleared to black
+        size_t centerIdx = (128 * 256 + 128) * 4;
+        REQUIRE(ColorApproxEqual(pixels[centerIdx], 0));      // R
+        REQUIRE(ColorApproxEqual(pixels[centerIdx + 1], 0));  // G
+        REQUIRE(ColorApproxEqual(pixels[centerIdx + 2], 0));  // B
+    }
+
+    SECTION("Multiple frames") {
+        for (int i = 0; i < 3; i++) {
+            renderer.BeginFrame();
+            renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+
+            renderer.ImGuiNewFrame();
+            renderer.ImGuiRender();
+
+            renderer.EndFrame();
+            renderer.Submit();
+
+            auto pixels = renderer.ReadPixels();
+            REQUIRE(!pixels.empty());
+        }
+    }
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("HeadlessRenderer ImGui widget rendering", "[Vulkan][Headless][ImGui]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitImGui());
+
+    // Render a frame with a window that covers most of the screen
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+
+    renderer.ImGuiNewFrame();
+
+    // Create a large window with some content
+    ImGui::SetNextWindowPos(ImVec2(10, 10));
+    ImGui::SetNextWindowSize(ImVec2(236, 236));
+    ImGui::Begin("Test Window", nullptr, ImGuiWindowFlags_NoTitleBar);
+    ImGui::Text("Hello, World!");
+    ImGui::Button("Test Button");
+    ImGui::End();
+
+    renderer.ImGuiRender();
+    renderer.EndFrame();
+    renderer.Submit();
+
+    auto pixels = renderer.ReadPixels();
+    REQUIRE(!pixels.empty());
+
+    // The window should have rendered some non-black pixels
+    // Check center of the window area
+    size_t centerIdx = (128 * 256 + 128) * 4;
+    uint8_t r = pixels[centerIdx];
+    uint8_t g = pixels[centerIdx + 1];
+    uint8_t b = pixels[centerIdx + 2];
+
+    INFO("Center pixel: R=" << (int)r << " G=" << (int)g << " B=" << (int)b);
+
+    // ImGui dark theme window background is not pure black
+    // So at least one channel should be non-zero
+    bool hasContent = (r > 5 || g > 5 || b > 5);
+    REQUIRE(hasContent);
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("HeadlessRenderer ImGui with clear color", "[Vulkan][Headless][ImGui]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(128, 128));
+    REQUIRE(renderer.InitImGui());
+
+    // Render with red clear color and no ImGui windows
+    renderer.BeginFrame();
+    renderer.Clear(1.0f, 0.0f, 0.0f, 1.0f);  // Red
+
+    renderer.ImGuiNewFrame();
+    // No windows - should just see clear color
+    renderer.ImGuiRender();
+
+    renderer.EndFrame();
+    renderer.Submit();
+
+    auto pixels = renderer.ReadPixels();
+    REQUIRE(!pixels.empty());
+
+    // Center should be red (clear color)
+    size_t centerIdx = (64 * 128 + 64) * 4;
+    REQUIRE(ColorApproxEqual(pixels[centerIdx], 255));      // R
+    REQUIRE(ColorApproxEqual(pixels[centerIdx + 1], 0));    // G
+    REQUIRE(ColorApproxEqual(pixels[centerIdx + 2], 0));    // B
 
     renderer.Shutdown();
 }
