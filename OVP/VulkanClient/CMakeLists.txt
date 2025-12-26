@@ -8,6 +8,26 @@ find_package(Vulkan REQUIRED)
 
 set(VULKAN_SOURCE_DIR ${CMAKE_SOURCE_DIR}/OVP/VulkanClient)
 
+# HeadlessRenderer - static library for testing (no Orbiter dependencies)
+add_library(HeadlessRenderer STATIC
+    HeadlessRenderer.cpp
+    HeadlessRenderer.h
+)
+
+target_include_directories(HeadlessRenderer PUBLIC
+    ${Vulkan_INCLUDE_DIRS}
+    ${VULKAN_SOURCE_DIR}
+)
+
+target_link_libraries(HeadlessRenderer
+    Vulkan::Vulkan
+)
+
+set_target_properties(HeadlessRenderer PROPERTIES
+    FOLDER OVP
+)
+
+# VulkanClient - main graphics client module
 set(SourceFiles
     VulkanClient.cpp
 )

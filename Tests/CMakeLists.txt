@@ -45,6 +45,35 @@ endfunction()
 # Register unit tests
 add_test_file(Lua.Interpreter)
 
+# Vulkan headless rendering tests (only if VulkanClient is enabled)
+if(ORBITER_BUILD_VULKANCLIENT)
+	find_package(Vulkan REQUIRED)
+
+	add_executable(Vulkan.Headless "Vulkan.Headless.cpp")
+
+	set_target_properties(Vulkan.Headless PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${ORBITER_BINARY_ROOT_DIR}")
+
+	target_include_directories(Vulkan.Headless
+		PRIVATE ${Vulkan_INCLUDE_DIRS}
+		PRIVATE ${ORBITER_SOURCE_ROOT_DIR}/OVP/VulkanClient
+	)
+
+	target_link_libraries(Vulkan.Headless
+		HeadlessRenderer
+		Vulkan::Vulkan
+		Catch2::Catch2WithMain
+	)
+
+	add_dependencies(Vulkan.Headless HeadlessRenderer)
+
+	add_test(
+		NAME Vulkan.Headless
+		COMMAND $<TARGET_FILE:Vulkan.Headless>
+		WORKING_DIRECTORY ${ORBITER_BINARY_ROOT_DIR}
+	)
+	set_tests_properties(Vulkan.Headless PROPERTIES TIMEOUT 120)
+endif()
+
 if (BUILD_ORBITER_SERVER)
 
 	# Sanity check for scenario tests
