@@ -11,6 +11,7 @@
 #include "GraphicsAPI.h"
 #include "Core/VulkanContext.h"
 #include "Core/VulkanSwapchain.h"
+#include "Core/SceneRenderer.h"
 #include <vector>
 
 // Forward declare ImGui types
@@ -91,6 +92,10 @@ private:
 
     // Frame state - tracks if clbkRenderScene started a frame successfully
     bool m_frameInProgress;
+
+    // 3D scene rendering
+    SceneRenderer m_sceneRenderer;
+    bool m_sceneRendererInitialized;
 };
 
 #endif // !VULKANCLIENT_H

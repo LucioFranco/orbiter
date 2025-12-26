@@ -12,6 +12,7 @@
 #define HEADLESSRENDERER_H
 
 #include "Core/VulkanContext.h"
+#include "Core/SceneRenderer.h"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -29,9 +30,10 @@ public:
     void Shutdown();
     bool IsInitialized() const { return m_initialized; }
 
-    // Rendering - Phase 1
+    // Rendering
     void BeginFrame();
     void Clear(float r, float g, float b, float a);
+    void RenderScene();  // Renders 3D scene using SceneRenderer
     void EndFrame();
     void Submit();
 
@@ -60,17 +62,20 @@ public:
 private:
     // Initialization helpers (renderer-specific resources)
     bool CreateColorImage();
+    bool CreateDepthImage();
     bool CreateStagingBuffer();
     bool CreateRenderPass();
     bool CreateFramebuffer();
     bool AllocateCommandBuffer();
     bool LoadRenderDoc();
+    VkFormat ChooseDepthFormat();
 
     // Cleanup helpers
     void DestroyFramebuffer();
     void DestroyRenderPass();
     void DestroyStagingBuffer();
     void DestroyColorImage();
+    void DestroyDepthImage();
 
     // State
     bool m_initialized;
@@ -88,6 +93,12 @@ private:
     VkDeviceMemory m_colorMemory;
     VkImageView m_colorImageView;
     VkFormat m_colorFormat;
+
+    // Depth buffer
+    VkImage m_depthImage;
+    VkDeviceMemory m_depthMemory;
+    VkImageView m_depthImageView;
+    VkFormat m_depthFormat;
 
     // Render pass
     VkRenderPass m_renderPass;
@@ -111,6 +122,10 @@ private:
     // ImGui state
     VkDescriptorPool m_imguiDescriptorPool;
     bool m_imguiInitialized;
+
+    // 3D scene rendering
+    SceneRenderer m_sceneRenderer;
+    bool m_sceneRendererInitialized;
 };
 
 #endif // HEADLESSRENDERER_H

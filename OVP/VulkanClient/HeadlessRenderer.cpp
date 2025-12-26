@@ -8,6 +8,7 @@
 #include "HeadlessRenderer.h"
 #include <cstring>
 #include <iostream>
+#include <array>
 
 // ImGui includes
 // HeadlessRenderer uses its own copy of ImGui (not Orbiter's shared context)
@@ -73,6 +74,10 @@ HeadlessRenderer::HeadlessRenderer()
     , m_colorMemory(VK_NULL_HANDLE)
     , m_colorImageView(VK_NULL_HANDLE)
     , m_colorFormat(VK_FORMAT_R8G8B8A8_UNORM)
+    , m_depthImage(VK_NULL_HANDLE)
+    , m_depthMemory(VK_NULL_HANDLE)
+    , m_depthImageView(VK_NULL_HANDLE)
+    , m_depthFormat(VK_FORMAT_D32_SFLOAT)
     , m_renderPass(VK_NULL_HANDLE)
     , m_framebuffer(VK_NULL_HANDLE)
     , m_stagingBuffer(VK_NULL_HANDLE)
@@ -83,6 +88,7 @@ HeadlessRenderer::HeadlessRenderer()
     , m_imguiDescriptorPool(VK_NULL_HANDLE)
     , m_imguiInitialized(false)
     , m_renderPassStarted(false)
+    , m_sceneRendererInitialized(false)
 {
     m_clearColor[0] = 0.0f;
     m_clearColor[1] = 0.0f;
@@ -127,6 +133,12 @@ bool HeadlessRenderer::Init(uint32_t width, uint32_t height)
     }
     std::cout << "[API] Color image created: OK" << std::endl;
 
+    if (!CreateDepthImage()) {
+        std::cerr << "[HeadlessRenderer] Failed to create depth image" << std::endl;
+        return false;
+    }
+    std::cout << "[API] Depth image created: OK" << std::endl;
+
     if (!CreateStagingBuffer()) {
         std::cerr << "[HeadlessRenderer] Failed to create staging buffer" << std::endl;
         return false;
@@ -152,6 +164,16 @@ bool HeadlessRenderer::Init(uint32_t width, uint32_t height)
     std::cout << "[API] Command buffer allocated: OK" << std::endl;
 
     m_initialized = true;
+
+    // Initialize SceneRenderer (after render pass is created)
+    VkExtent2D extent = { m_width, m_height };
+    if (m_sceneRenderer.Init(&m_ctx, m_renderPass, extent)) {
+        m_sceneRendererInitialized = true;
+        std::cout << "[API] SceneRenderer initialized: OK" << std::endl;
+    } else {
+        std::cout << "[API] SceneRenderer initialization: SKIPPED (optional)" << std::endl;
+    }
+
     std::cout << "[HeadlessRenderer] Initialization complete" << std::endl;
 
     return true;
@@ -161,12 +183,19 @@ void HeadlessRenderer::Shutdown()
 {
     m_ctx.WaitIdle();
 
-    // Shutdown ImGui first (before destroying Vulkan resources)
+    // Shutdown SceneRenderer first (uses pipeline and buffers)
+    if (m_sceneRendererInitialized) {
+        m_sceneRenderer.Shutdown();
+        m_sceneRendererInitialized = false;
+    }
+
+    // Shutdown ImGui (before destroying Vulkan resources)
     ShutdownImGui();
 
     DestroyFramebuffer();
     DestroyRenderPass();
     DestroyStagingBuffer();
+    DestroyDepthImage();
     DestroyColorImage();
 
     // Command buffer is freed when command pool is destroyed
@@ -232,6 +261,89 @@ bool HeadlessRenderer::CreateColorImage()
     return vkCreateImageView(device, &viewInfo, nullptr, &m_colorImageView) == VK_SUCCESS;
 }
 
+VkFormat HeadlessRenderer::ChooseDepthFormat()
+{
+    const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D16_UNORM
+    };
+
+    VkPhysicalDevice physicalDevice = m_ctx.GetPhysicalDevice();
+
+    for (VkFormat format : candidates) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+
+        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            return format;
+        }
+    }
+
+    return VK_FORMAT_D32_SFLOAT;  // Fallback
+}
+
+bool HeadlessRenderer::CreateDepthImage()
+{
+    VkDevice device = m_ctx.GetDevice();
+    m_depthFormat = ChooseDepthFormat();
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = m_depthFormat;
+    imageInfo.extent = { m_width, m_height, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vkCreateImage(device, &imageInfo, nullptr, &m_depthImage) != VK_SUCCESS) {
+        return false;
+    }
+
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(device, m_depthImage, &memReqs);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = m_ctx.FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &m_depthMemory) != VK_SUCCESS) {
+        vkDestroyImage(device, m_depthImage, nullptr);
+        m_depthImage = VK_NULL_HANDLE;
+        return false;
+    }
+
+    vkBindImageMemory(device, m_depthImage, m_depthMemory, 0);
+
+    // Create image view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = m_depthImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = m_depthFormat;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(device, &viewInfo, nullptr, &m_depthImageView) != VK_SUCCESS) {
+        vkFreeMemory(device, m_depthMemory, nullptr);
+        vkDestroyImage(device, m_depthImage, nullptr);
+        m_depthImage = VK_NULL_HANDLE;
+        m_depthMemory = VK_NULL_HANDLE;
+        return false;
+    }
+
+    return true;
+}
+
 bool HeadlessRenderer::CreateStagingBuffer()
 {
     VkDevice device = m_ctx.GetDevice();
@@ -265,6 +377,7 @@ bool HeadlessRenderer::CreateStagingBuffer()
 
 bool HeadlessRenderer::CreateRenderPass()
 {
+    // Color attachment
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = m_colorFormat;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -275,19 +388,37 @@ bool HeadlessRenderer::CreateRenderPass()
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
+    // Depth attachment
+    VkAttachmentDescription depthAttachment{};
+    depthAttachment.format = m_depthFormat;
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkAttachmentReference colorRef{};
     colorRef.attachment = 0;
     colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depthRef{};
+    depthRef.attachment = 1;
+    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
+
+    std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
 
     VkRenderPassCreateInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+    renderPassInfo.pAttachments = attachments.data();
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
 
@@ -296,11 +427,13 @@ bool HeadlessRenderer::CreateRenderPass()
 
 bool HeadlessRenderer::CreateFramebuffer()
 {
+    std::array<VkImageView, 2> attachments = { m_colorImageView, m_depthImageView };
+
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbInfo.renderPass = m_renderPass;
-    fbInfo.attachmentCount = 1;
-    fbInfo.pAttachments = &m_colorImageView;
+    fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+    fbInfo.pAttachments = attachments.data();
     fbInfo.width = m_width;
     fbInfo.height = m_height;
     fbInfo.layers = 1;
@@ -340,12 +473,17 @@ void HeadlessRenderer::Clear(float r, float g, float b, float a)
     m_clearColor[3] = a;
 }
 
-void HeadlessRenderer::EndFrame()
+void HeadlessRenderer::RenderScene()
 {
-    // Start render pass if not already started (e.g., by ImGui)
+    if (!m_sceneRendererInitialized) {
+        return;
+    }
+
+    // Start render pass if not already started
     if (!m_renderPassStarted) {
-        VkClearValue clearValue{};
-        clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
 
         VkRenderPassBeginInfo rpBegin{};
         rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -353,8 +491,33 @@ void HeadlessRenderer::EndFrame()
         rpBegin.framebuffer = m_framebuffer;
         rpBegin.renderArea.offset = { 0, 0 };
         rpBegin.renderArea.extent = { m_width, m_height };
-        rpBegin.clearValueCount = 1;
-        rpBegin.pClearValues = &clearValue;
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
+    // Render the 3D scene
+    m_sceneRenderer.Render(m_commandBuffer);
+}
+
+void HeadlessRenderer::EndFrame()
+{
+    // Start render pass if not already started (e.g., by ImGui or RenderScene)
+    if (!m_renderPassStarted) {
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
 
         vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
         m_renderPassStarted = true;
@@ -539,6 +702,23 @@ void HeadlessRenderer::DestroyColorImage()
     }
 }
 
+void HeadlessRenderer::DestroyDepthImage()
+{
+    VkDevice device = m_ctx.GetDevice();
+    if (m_depthImageView != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, m_depthImageView, nullptr);
+        m_depthImageView = VK_NULL_HANDLE;
+    }
+    if (m_depthImage != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkDestroyImage(device, m_depthImage, nullptr);
+        m_depthImage = VK_NULL_HANDLE;
+    }
+    if (m_depthMemory != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+        vkFreeMemory(device, m_depthMemory, nullptr);
+        m_depthMemory = VK_NULL_HANDLE;
+    }
+}
+
 // ======================================================================
 // ImGui integration
 // ======================================================================
@@ -672,8 +852,9 @@ void HeadlessRenderer::ImGuiRender()
 
     // Start render pass if not already started
     if (!m_renderPassStarted) {
-        VkClearValue clearValue{};
-        clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
 
         VkRenderPassBeginInfo rpBegin{};
         rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -681,8 +862,8 @@ void HeadlessRenderer::ImGuiRender()
         rpBegin.framebuffer = m_framebuffer;
         rpBegin.renderArea.offset = { 0, 0 };
         rpBegin.renderArea.extent = { m_width, m_height };
-        rpBegin.clearValueCount = 1;
-        rpBegin.pClearValues = &clearValue;
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
 
         vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
         m_renderPassStarted = true;

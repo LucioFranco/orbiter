@@ -10,6 +10,7 @@
 #include "VulkanClient.h"
 #include "OrbiterAPI.h"
 #include <vulkan/vulkan_win32.h>
+#include <array>
 
 // ImGui includes
 #include <imgui.h>
@@ -52,6 +53,7 @@ VulkanClient::VulkanClient(HINSTANCE hInstance)
     , m_imguiDescriptorPool(VK_NULL_HANDLE)
     , m_imguiInitialized(false)
     , m_frameInProgress(false)
+    , m_sceneRendererInitialized(false)
 {
     for (uint32_t i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++) {
         m_commandBuffers[i] = VK_NULL_HANDLE;
@@ -173,6 +175,15 @@ HWND VulkanClient::clbkCreateRenderWindow()
     }
     oapiWriteLog(const_cast<char*>("VulkanClient: Command buffers allocated"));
 
+    // Initialize SceneRenderer for 3D rendering
+    VkExtent2D extent = m_swapchain.GetExtent();
+    if (m_sceneRenderer.Init(&m_ctx, m_swapchain.GetRenderPass(), extent)) {
+        m_sceneRendererInitialized = true;
+        oapiWriteLog(const_cast<char*>("VulkanClient: SceneRenderer initialized"));
+    } else {
+        oapiWriteLog(const_cast<char*>("VulkanClient: SceneRenderer initialization failed (optional)"));
+    }
+
     oapiWriteLog(const_cast<char*>("VulkanClient: Render window ready"));
     return hWnd;
 }
@@ -182,6 +193,12 @@ void VulkanClient::clbkDestroyRenderWindow(bool fastclose)
     oapiWriteLog(const_cast<char*>("VulkanClient: Destroying render window..."));
 
     m_ctx.WaitIdle();
+
+    // Shutdown SceneRenderer first (uses pipeline and buffers)
+    if (m_sceneRendererInitialized) {
+        m_sceneRenderer.Shutdown();
+        m_sceneRendererInitialized = false;
+    }
 
     // Command buffers are freed when command pool is destroyed
     for (uint32_t i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++) {
@@ -250,9 +267,10 @@ void VulkanClient::clbkRenderScene()
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &beginInfo);
 
-    // Begin render pass with clear color
-    VkClearValue clearValue{};
-    clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+    // Begin render pass with clear color and depth
+    std::array<VkClearValue, 2> clearValues{};
+    clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+    clearValues[1].depthStencil = { 1.0f, 0 };
 
     VkExtent2D extent = m_swapchain.GetExtent();
 
@@ -262,8 +280,8 @@ void VulkanClient::clbkRenderScene()
     rpBegin.framebuffer = m_swapchain.GetCurrentFramebuffer();
     rpBegin.renderArea.offset = { 0, 0 };
     rpBegin.renderArea.extent = extent;
-    rpBegin.clearValueCount = 1;
-    rpBegin.pClearValues = &clearValue;
+    rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    rpBegin.pClearValues = clearValues.data();
 
     vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -281,6 +299,11 @@ void VulkanClient::clbkRenderScene()
     scissor.offset = { 0, 0 };
     scissor.extent = extent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Render 3D scene
+    if (m_sceneRendererInitialized) {
+        m_sceneRenderer.Render(cmd);
+    }
 
     // Mark frame as in progress - clbkDisplayFrame will check this
     m_frameInProgress = true;
@@ -365,8 +388,9 @@ void VulkanClient::RecordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
 
     vkBeginCommandBuffer(cmd, &beginInfo);
 
-    VkClearValue clearValue{};
-    clearValue.color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+    std::array<VkClearValue, 2> clearValues{};
+    clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+    clearValues[1].depthStencil = { 1.0f, 0 };
 
     VkExtent2D extent = m_swapchain.GetExtent();
 
@@ -376,8 +400,8 @@ void VulkanClient::RecordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
     rpBegin.framebuffer = m_swapchain.GetCurrentFramebuffer();
     rpBegin.renderArea.offset = { 0, 0 };
     rpBegin.renderArea.extent = extent;
-    rpBegin.clearValueCount = 1;
-    rpBegin.pClearValues = &clearValue;
+    rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    rpBegin.pClearValues = clearValues.data();
 
     vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 

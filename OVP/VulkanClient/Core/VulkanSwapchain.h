@@ -36,6 +36,7 @@ public:
     VkFramebuffer GetCurrentFramebuffer() const;
     VkExtent2D GetExtent() const { return m_extent; }
     VkFormat GetFormat() const { return m_format; }
+    VkFormat GetDepthFormat() const { return m_depthFormat; }
     uint32_t GetImageCount() const { return static_cast<uint32_t>(m_images.size()); }
     uint32_t GetCurrentImageIndex() const { return m_currentImageIndex; }
     uint32_t GetCurrentFrame() const { return m_currentFrame; }
@@ -60,6 +61,11 @@ private:
     VkSurfaceFormatKHR ChooseSurfaceFormat();
     VkPresentModeKHR ChoosePresentMode();
     VkExtent2D ChooseExtent(uint32_t width, uint32_t height);
+    VkFormat ChooseDepthFormat();
+
+    // Depth buffer helpers
+    bool CreateDepthBuffer();
+    void DestroyDepthBuffer();
 
     // Cleanup helpers
     void CleanupSwapchain();
@@ -80,6 +86,12 @@ private:
     // Render pass and framebuffers
     VkRenderPass m_renderPass;
     std::vector<VkFramebuffer> m_framebuffers;
+
+    // Depth buffer
+    VkFormat m_depthFormat;
+    VkImage m_depthImage;
+    VkDeviceMemory m_depthMemory;
+    VkImageView m_depthImageView;
 
     // Frame synchronization
     uint32_t m_currentImageIndex;

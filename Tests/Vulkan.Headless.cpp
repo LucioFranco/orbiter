@@ -437,43 +437,148 @@ TEST_CASE("HeadlessRenderer ImGui with clear color", "[Vulkan][Headless][ImGui]"
     renderer.Shutdown();
 }
 
-// Phase 2 placeholder tests (to be implemented with geometry support)
-/*
-TEST_CASE("HeadlessRenderer draw triangle", "[Vulkan][Headless][Geometry]")
+// ======================================================================
+// 3D Rendering Tests (using SceneRenderer)
+// ======================================================================
+
+TEST_CASE("HeadlessRenderer 3D scene rendering", "[Vulkan][Headless][3D]")
 {
     HeadlessRenderer renderer;
     REQUIRE(renderer.Init(256, 256));
 
-    // TODO: Implement when geometry support is added
-    // renderer.BeginFrame();
-    // renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
-    // renderer.DrawTriangle(vertices);
-    // renderer.EndFrame();
-    // renderer.Submit();
-    //
-    // auto pixels = renderer.ReadPixels();
-    // // Verify triangle pixels are set
+    SECTION("Scene renders visible geometry") {
+        // First, render without scene to get baseline
+        renderer.BeginFrame();
+        renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);  // Black
+        renderer.EndFrame();
+        renderer.Submit();
+
+        auto baselinePixels = renderer.ReadPixels();
+        size_t centerIdx = (128 * 256 + 128) * 4;
+
+        // Baseline should be black
+        REQUIRE(ColorApproxEqual(baselinePixels[centerIdx], 0));
+        REQUIRE(ColorApproxEqual(baselinePixels[centerIdx + 1], 0));
+        REQUIRE(ColorApproxEqual(baselinePixels[centerIdx + 2], 0));
+
+        // Now render with scene
+        renderer.BeginFrame();
+        renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);  // Black
+        renderer.RenderScene();  // Renders colored triangle
+        renderer.EndFrame();
+        renderer.Submit();
+
+        auto scenePixels = renderer.ReadPixels();
+
+        // The scene should have some visible colored geometry
+        // Check that at least some pixels are not black (triangle is visible)
+        int nonBlackPixels = 0;
+        for (size_t i = 0; i < 256 * 256; i++) {
+            size_t idx = i * 4;
+            if (scenePixels[idx] > 10 || scenePixels[idx + 1] > 10 || scenePixels[idx + 2] > 10) {
+                nonBlackPixels++;
+            }
+        }
+
+        INFO("Non-black pixels: " << nonBlackPixels);
+        // Triangle should cover some area - expect at least a few hundred pixels
+        REQUIRE(nonBlackPixels > 100);
+    }
+
+    SECTION("Scene renders colored triangle") {
+        renderer.BeginFrame();
+        renderer.Clear(0.2f, 0.2f, 0.2f, 1.0f);  // Dark gray background
+        renderer.RenderScene();
+        renderer.EndFrame();
+        renderer.Submit();
+
+        auto pixels = renderer.ReadPixels();
+
+        // Count pixels that match triangle colors (red, green, blue vertex colors)
+        int redPixels = 0;
+        int greenPixels = 0;
+        int bluePixels = 0;
+        int grayPixels = 0;
+
+        uint8_t grayVal = FloatToUint8(0.2f);
+
+        for (size_t i = 0; i < 256 * 256; i++) {
+            size_t idx = i * 4;
+            uint8_t r = pixels[idx];
+            uint8_t g = pixels[idx + 1];
+            uint8_t b = pixels[idx + 2];
+
+            // Check for background gray
+            if (ColorApproxEqual(r, grayVal, 5) &&
+                ColorApproxEqual(g, grayVal, 5) &&
+                ColorApproxEqual(b, grayVal, 5)) {
+                grayPixels++;
+            }
+            // Check for strong red component
+            else if (r > 128 && r > g && r > b) {
+                redPixels++;
+            }
+            // Check for strong green component
+            else if (g > 128 && g > r && g > b) {
+                greenPixels++;
+            }
+            // Check for strong blue component
+            else if (b > 128 && b > r && b > g) {
+                bluePixels++;
+            }
+        }
+
+        INFO("Red pixels: " << redPixels);
+        INFO("Green pixels: " << greenPixels);
+        INFO("Blue pixels: " << bluePixels);
+        INFO("Gray (background) pixels: " << grayPixels);
+
+        // The triangle has RGB vertex colors, so we should see some of each
+        // The colors blend smoothly across the triangle
+        int coloredPixels = redPixels + greenPixels + bluePixels;
+        REQUIRE(coloredPixels > 50);  // Should have some colored geometry
+        REQUIRE(grayPixels > 0);      // Should have some background visible
+    }
 
     renderer.Shutdown();
 }
 
-TEST_CASE("HeadlessRenderer textured quad", "[Vulkan][Headless][Geometry]")
+TEST_CASE("HeadlessRenderer 3D with ImGui", "[Vulkan][Headless][3D][ImGui]")
 {
     HeadlessRenderer renderer;
     REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitImGui());
 
-    // TODO: Implement when texture support is added
+    // Render 3D scene with ImGui overlay
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+    renderer.RenderScene();
+
+    renderer.ImGuiNewFrame();
+    ImGui::SetNextWindowPos(ImVec2(10, 10));
+    ImGui::SetNextWindowSize(ImVec2(100, 50));
+    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar);
+    ImGui::Text("3D Scene");
+    ImGui::End();
+    renderer.ImGuiRender();
+
+    renderer.EndFrame();
+    renderer.Submit();
+
+    auto pixels = renderer.ReadPixels();
+    REQUIRE(!pixels.empty());
+
+    // Count non-black pixels (scene + UI should produce visible content)
+    int visiblePixels = 0;
+    for (size_t i = 0; i < 256 * 256; i++) {
+        size_t idx = i * 4;
+        if (pixels[idx] > 5 || pixels[idx + 1] > 5 || pixels[idx + 2] > 5) {
+            visiblePixels++;
+        }
+    }
+
+    INFO("Visible pixels: " << visiblePixels);
+    REQUIRE(visiblePixels > 500);  // Scene + UI should produce significant visible content
 
     renderer.Shutdown();
 }
-
-TEST_CASE("HeadlessRenderer MVP transforms", "[Vulkan][Headless][Geometry]")
-{
-    HeadlessRenderer renderer;
-    REQUIRE(renderer.Init(256, 256));
-
-    // TODO: Implement when uniform buffer support is added
-
-    renderer.Shutdown();
-}
-*/

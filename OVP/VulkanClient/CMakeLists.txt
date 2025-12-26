@@ -6,7 +6,51 @@ project(VulkanClient VERSION 1.0)
 # Find Vulkan SDK
 find_package(Vulkan REQUIRED)
 
+# Find glslc shader compiler
+find_program(GLSLC glslc HINTS $ENV{VULKAN_SDK}/Bin)
+if(NOT GLSLC)
+    message(FATAL_ERROR "glslc not found. Please install the Vulkan SDK.")
+endif()
+
+# Fetch GLM for matrix math (header-only)
+FetchContent_Declare(
+    glm
+    GIT_REPOSITORY https://github.com/g-truc/glm.git
+    GIT_TAG 1.0.1
+    GIT_SHALLOW TRUE
+)
+# Configure GLM as header-only before making available
+set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(glm)
+
 set(VULKAN_SOURCE_DIR ${CMAKE_SOURCE_DIR}/OVP/VulkanClient)
+
+# Shader compilation function
+# Compiles GLSL to SPIR-V and generates a C header with the bytecode
+set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/Shaders)
+file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
+
+function(compile_shader SHADER_SOURCE)
+    get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME)
+    string(REPLACE "." "_" SHADER_VAR ${SHADER_NAME})
+    set(SPV_FILE ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv)
+
+    add_custom_command(
+        OUTPUT ${SPV_FILE}
+        COMMAND ${GLSLC} -o ${SPV_FILE} ${SHADER_SOURCE}
+        DEPENDS ${SHADER_SOURCE}
+        COMMENT "Compiling shader ${SHADER_NAME}"
+        VERBATIM
+    )
+    set(SHADER_SPV_FILES ${SHADER_SPV_FILES} ${SPV_FILE} PARENT_SCOPE)
+endfunction()
+
+# Compile shaders
+compile_shader(${VULKAN_SOURCE_DIR}/Shaders/basic.vert)
+compile_shader(${VULKAN_SOURCE_DIR}/Shaders/basic.frag)
+
+# Create custom target for shaders
+add_custom_target(VulkanShaders DEPENDS ${SHADER_SPV_FILES})
 
 # Fetch ImGui (needed by both HeadlessRenderer for testing and VulkanClient)
 FetchContent_MakeAvailable(imgui)
@@ -17,6 +61,12 @@ add_library(VulkanCore STATIC
     Core/VulkanContext.h
     Core/VulkanSwapchain.cpp
     Core/VulkanSwapchain.h
+    Core/VulkanPipeline.cpp
+    Core/VulkanPipeline.h
+    Core/VulkanBuffer.cpp
+    Core/VulkanBuffer.h
+    Core/SceneRenderer.cpp
+    Core/SceneRenderer.h
 )
 
 target_include_directories(VulkanCore PUBLIC
@@ -26,7 +76,18 @@ target_include_directories(VulkanCore PUBLIC
 
 target_link_libraries(VulkanCore PUBLIC
     Vulkan::Vulkan
+    glm::glm
 )
+
+# Add shader output directory to include paths (for loading compiled shaders)
+target_compile_definitions(VulkanCore PUBLIC
+    SHADER_DIR="${SHADER_OUTPUT_DIR}"
+    GLM_FORCE_RADIANS
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+)
+
+# Ensure shaders are compiled before VulkanCore
+add_dependencies(VulkanCore VulkanShaders)
 
 set_target_properties(VulkanCore PROPERTIES
     FOLDER OVP
