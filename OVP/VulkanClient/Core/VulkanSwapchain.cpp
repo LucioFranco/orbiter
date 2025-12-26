@@ -73,6 +73,9 @@ bool VulkanSwapchain::Init(VulkanContext* ctx, VkSurfaceKHR surface, uint32_t wi
     }
     std::cout << "[VulkanSwapchain] Sync objects created" << std::endl;
 
+    // Initialize per-image fences to VK_NULL_HANDLE (one per swapchain image)
+    m_imagesInFlight.assign(m_images.size(), VK_NULL_HANDLE);
+
     m_initialized = true;
     return true;
 }
@@ -125,6 +128,9 @@ bool VulkanSwapchain::Recreate(uint32_t width, uint32_t height)
         return false;
     }
 
+    // Reset per-image tracking for new swapchain images
+    m_imagesInFlight.assign(m_images.size(), VK_NULL_HANDLE);
+
     std::cout << "[VulkanSwapchain] Recreated: " << width << "x" << height << std::endl;
     return true;
 }
@@ -136,6 +142,7 @@ bool VulkanSwapchain::AcquireNextImage()
     // Wait for the fence of the current frame
     vkWaitForFences(device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
 
+    // Acquire image
     VkResult result = vkAcquireNextImageKHR(
         device,
         m_swapchain,
@@ -154,13 +161,23 @@ bool VulkanSwapchain::AcquireNextImage()
         return false;
     }
 
+    // If image is already in flight, wait for it
+    if (!m_imagesInFlight.empty() && m_imagesInFlight[m_currentImageIndex] != VK_NULL_HANDLE) {
+        vkWaitForFences(device, 1, &m_imagesInFlight[m_currentImageIndex], VK_TRUE, UINT64_MAX);
+    }
+
+    // Associate image with the fence for this frame
+    if (!m_imagesInFlight.empty()) {
+        m_imagesInFlight[m_currentImageIndex] = m_inFlightFences[m_currentFrame];
+    }
+
     // Reset fence only when we know we're submitting work
     vkResetFences(device, 1, &m_inFlightFences[m_currentFrame]);
 
     return true;
 }
 
-void VulkanSwapchain::Present()
+bool VulkanSwapchain::Present()
 {
     VkSemaphore signalSemaphores[] = { m_renderFinishedSemaphores[m_currentFrame] };
 
@@ -175,8 +192,15 @@ void VulkanSwapchain::Present()
     VkResult result = vkQueuePresentKHR(m_ctx->GetPresentQueue(), &presentInfo);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-        // Swapchain will be recreated on next frame
+        return false;
     }
+
+    if (result != VK_SUCCESS) {
+        std::cerr << "[VulkanSwapchain] Failed to present swapchain image" << std::endl;
+        return false;
+    }
+
+    return true;
 }
 
 void VulkanSwapchain::AdvanceFrame()
@@ -482,6 +506,7 @@ void VulkanSwapchain::CleanupSwapchain()
     }
     m_imageViews.clear();
     m_images.clear();
+    m_imagesInFlight.clear();
 
     if (m_swapchain != VK_NULL_HANDLE) {
         vkDestroySwapchainKHR(device, m_swapchain, nullptr);

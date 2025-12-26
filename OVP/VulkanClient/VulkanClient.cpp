@@ -133,26 +133,25 @@ HWND VulkanClient::clbkCreateRenderWindow()
     ctxInfo.appName = "Orbiter Space Flight Simulator";
     ctxInfo.enableValidation = false;  // Disabled for debugging crash
     ctxInfo.enableSurface = true;
+    ctxInfo.surfaceFactory = [this, hWnd](VkInstance instance) -> VkSurfaceKHR {
+        VkWin32SurfaceCreateInfoKHR surfaceInfo{};
+        surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        surfaceInfo.hwnd = hWnd;
+        surfaceInfo.hinstance = GetModuleHandle(nullptr);
 
-    if (!m_ctx.Init(ctxInfo)) {
+        if (vkCreateWin32SurfaceKHR(instance, &surfaceInfo, nullptr, &m_surface) != VK_SUCCESS) {
+            m_surface = VK_NULL_HANDLE;
+        }
+        return m_surface;
+    };
+
+    if (!m_ctx.Init(ctxInfo) || m_surface == VK_NULL_HANDLE) {
         oapiWriteLog(const_cast<char*>("VulkanClient: Failed to initialize Vulkan context"));
         return nullptr;
     }
 
     sprintf_s(buf, "VulkanClient: Using GPU: %s", m_ctx.GetGPUName().c_str());
     oapiWriteLog(buf);
-
-    // Create Vulkan surface from window
-    VkWin32SurfaceCreateInfoKHR surfaceInfo{};
-    surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-    surfaceInfo.hwnd = hWnd;
-    surfaceInfo.hinstance = GetModuleHandle(nullptr);
-
-    if (vkCreateWin32SurfaceKHR(m_ctx.GetInstance(), &surfaceInfo, nullptr, &m_surface) != VK_SUCCESS) {
-        oapiWriteLog(const_cast<char*>("VulkanClient: Failed to create Vulkan surface"));
-        return nullptr;
-    }
-    oapiWriteLog(const_cast<char*>("VulkanClient: Vulkan surface created"));
 
     // Initialize swapchain
     if (!m_swapchain.Init(&m_ctx, m_surface, m_viewportWidth, m_viewportHeight)) {
@@ -334,8 +333,24 @@ bool VulkanClient::clbkDisplayFrame()
     vkQueueSubmit(m_ctx.GetGraphicsQueue(), 1, &submitInfo, m_swapchain.GetInFlightFence());
 
     // Present
-    m_swapchain.Present();
-    m_swapchain.AdvanceFrame();
+    if (!m_swapchain.Present()) {
+        // Swapchain will be recreated on next frame
+        HWND hWnd = GetRenderWindow();
+        if (hWnd) {
+            RECT rect;
+            GetClientRect(hWnd, &rect);
+            uint32_t width = rect.right - rect.left;
+            uint32_t height = rect.bottom - rect.top;
+            if (width > 0 && height > 0) {
+                oapiWriteLog(const_cast<char*>("VulkanClient: Recreating swapchain after present"));
+                m_swapchain.Recreate(width, height);
+                m_viewportWidth = width;
+                m_viewportHeight = height;
+            }
+        }
+    } else {
+        m_swapchain.AdvanceFrame();
+    }
 
     return true;
 }
@@ -444,16 +459,27 @@ void VulkanClient::clbkImGuiInit()
 
     oapiWriteLog(const_cast<char*>("VulkanClient: Initializing ImGui..."));
 
-    // Create descriptor pool for ImGui
+    // Create descriptor pool for ImGui (match backend example sizes)
     VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 }
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 100 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 100 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 100 }
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = 100;
-    poolInfo.poolSizeCount = 1;
+    const uint32_t poolCount = static_cast<uint32_t>(sizeof(poolSizes) / sizeof(poolSizes[0]));
+    poolInfo.maxSets = 100 * poolCount;
+    poolInfo.poolSizeCount = poolCount;
     poolInfo.pPoolSizes = poolSizes;
 
     if (vkCreateDescriptorPool(m_ctx.GetDevice(), &poolInfo, nullptr, &m_imguiDescriptorPool) != VK_SUCCESS) {

@@ -24,7 +24,7 @@ target_include_directories(VulkanCore PUBLIC
     ${VULKAN_SOURCE_DIR}
 )
 
-target_link_libraries(VulkanCore
+target_link_libraries(VulkanCore PUBLIC
     Vulkan::Vulkan
 )
 

@@ -98,13 +98,25 @@ bool VulkanContext::Init(const VulkanContextCreateInfo& info)
     }
     std::cout << "[VulkanContext] Instance created: OK" << std::endl;
 
-    if (!PickPhysicalDevice(info.surface)) {
+    VkSurfaceKHR surface = info.surface;
+
+    // If surface is required but not provided, try to create via factory
+    if (m_surfaceEnabled && surface == VK_NULL_HANDLE && info.surfaceFactory) {
+        surface = info.surfaceFactory(m_instance);
+        if (surface == VK_NULL_HANDLE) {
+            std::cerr << "[VulkanContext] Surface factory failed" << std::endl;
+            DestroyInstance();
+            return false;
+        }
+    }
+
+    if (!PickPhysicalDevice(surface)) {
         std::cerr << "[VulkanContext] Failed to find suitable GPU" << std::endl;
         return false;
     }
     std::cout << "[VulkanContext] Physical device: " << GetGPUName() << std::endl;
 
-    if (!CreateLogicalDevice(info.surface)) {
+    if (!CreateLogicalDevice(surface)) {
         std::cerr << "[VulkanContext] Failed to create logical device" << std::endl;
         return false;
     }

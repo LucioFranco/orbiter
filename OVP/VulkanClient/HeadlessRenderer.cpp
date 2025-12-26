@@ -570,16 +570,27 @@ bool HeadlessRenderer::InitImGui()
     // Initialize style
     ImGui::StyleColorsDark();
 
-    // Create descriptor pool for ImGui
+    // Create descriptor pool for ImGui (follow backend example sizes)
     VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 }
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 100 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 100 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 100 },
+        { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 100 }
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = 100;
-    poolInfo.poolSizeCount = 1;
+    const uint32_t poolCount = static_cast<uint32_t>(sizeof(poolSizes) / sizeof(poolSizes[0]));
+    poolInfo.maxSets = 100 * poolCount;
+    poolInfo.poolSizeCount = poolCount;
     poolInfo.pPoolSizes = poolSizes;
 
     if (vkCreateDescriptorPool(m_ctx.GetDevice(), &poolInfo, nullptr, &m_imguiDescriptorPool) != VK_SUCCESS) {

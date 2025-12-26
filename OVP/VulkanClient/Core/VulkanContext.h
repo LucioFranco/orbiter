@@ -15,13 +15,15 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 
 struct VulkanContextCreateInfo {
     const char* appName = "Orbiter";
     uint32_t appVersion = VK_MAKE_VERSION(1, 0, 0);
     bool enableValidation = true;
     bool enableSurface = false;  // True for windowed mode (adds surface extensions)
-    VkSurfaceKHR surface = VK_NULL_HANDLE;  // Optional: for present queue selection
+    VkSurfaceKHR surface = VK_NULL_HANDLE;  // Optional pre-created surface
+    std::function<VkSurfaceKHR(VkInstance)> surfaceFactory;  // Optional factory to create a surface after instance creation
 };
 
 class VulkanContext {

@@ -28,7 +28,7 @@ public:
 
     // Frame operations
     bool AcquireNextImage();  // Returns false if swapchain needs recreation
-    void Present();           // Present the current image
+    bool Present();           // Present the current image (false if swapchain out-of-date)
 
     // Accessors
     VkSwapchainKHR GetSwapchain() const { return m_swapchain; }
@@ -84,6 +84,7 @@ private:
     // Frame synchronization
     uint32_t m_currentImageIndex;
     uint32_t m_currentFrame;
+    std::vector<VkFence> m_imagesInFlight;  // Per-swapchain-image fences
     VkSemaphore m_imageAvailableSemaphores[MAX_FRAMES_IN_FLIGHT];
     VkSemaphore m_renderFinishedSemaphores[MAX_FRAMES_IN_FLIGHT];
     VkFence m_inFlightFences[MAX_FRAMES_IN_FLIGHT];
