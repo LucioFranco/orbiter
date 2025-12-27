@@ -1,41 +1,24 @@
 // ==============================================================
-// VulkanPipeline.h
+// TexturedPipeline.h
 // Part of the ORBITER VISUALISATION PROJECT (OVP)
 // Dual licensed under GPL v3 and LGPL v3
 // Copyright (C) 2024
 //
-// Graphics pipeline wrapper for basic 3D rendering.
+// Graphics pipeline for textured mesh rendering.
 // ==============================================================
 
-#ifndef VULKANPIPELINE_H
-#define VULKANPIPELINE_H
+#ifndef TEXTUREDPIPELINE_H
+#define TEXTUREDPIPELINE_H
 
 #include "VulkanContext.h"
+#include <vulkan/vulkan.h>
 #include <vector>
 #include <string>
 
-// Vertex format for basic 3D rendering (24 bytes)
-struct BasicVertex {
-    float position[3];
-    float color[3];
-
-    static VkVertexInputBindingDescription GetBindingDescription();
-    static std::array<VkVertexInputAttributeDescription, 2> GetAttributeDescriptions();
-};
-
-// Vertex format for textured rendering (20 bytes)
-struct TexturedVertex {
-    float position[3];   // location 0, offset 0
-    float texCoord[2];   // location 1, offset 12
-
-    static VkVertexInputBindingDescription GetBindingDescription();
-    static std::array<VkVertexInputAttributeDescription, 2> GetAttributeDescriptions();
-};
-
-class VulkanPipeline {
+class TexturedPipeline {
 public:
-    VulkanPipeline();
-    ~VulkanPipeline();
+    TexturedPipeline();
+    ~TexturedPipeline();
 
     // Lifecycle
     bool Init(VulkanContext* ctx, VkRenderPass renderPass);
@@ -45,6 +28,7 @@ public:
     // Accessors
     VkPipeline GetPipeline() const { return m_pipeline; }
     VkPipelineLayout GetLayout() const { return m_layout; }
+    VkDescriptorSetLayout GetDescriptorLayout() const { return m_descriptorLayout; }
 
 private:
     // Helpers
@@ -56,8 +40,9 @@ private:
     VulkanContext* m_ctx;
 
     // Pipeline objects
+    VkDescriptorSetLayout m_descriptorLayout;
     VkPipelineLayout m_layout;
     VkPipeline m_pipeline;
 };
 
-#endif // VULKANPIPELINE_H
+#endif // TEXTUREDPIPELINE_H

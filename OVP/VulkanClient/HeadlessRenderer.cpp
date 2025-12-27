@@ -564,6 +564,13 @@ bool HeadlessRenderer::LoadRenderDoc()
     return false;
 }
 
+void HeadlessRenderer::SetCaptureFilePath(const char* pathTemplate)
+{
+    if (m_renderDocApi) {
+        m_renderDocApi->SetCaptureFilePathTemplate(pathTemplate);
+    }
+}
+
 void HeadlessRenderer::StartCapture()
 {
     if (m_renderDocApi) {
@@ -818,4 +825,67 @@ void HeadlessRenderer::ImGuiRender()
 
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), m_commandBuffer);
+}
+
+// ======================================================================
+// Textured rendering
+// ======================================================================
+
+bool HeadlessRenderer::InitTexturedRendering()
+{
+    if (!m_initialized) {
+        std::cerr << "[HeadlessRenderer] Cannot init textured rendering - renderer not initialized" << std::endl;
+        return false;
+    }
+
+    if (!m_sceneRendererInitialized) {
+        std::cerr << "[HeadlessRenderer] Cannot init textured rendering - scene renderer not initialized" << std::endl;
+        return false;
+    }
+
+    StagingManager* staging = m_stagingManager.IsInitialized() ? &m_stagingManager : nullptr;
+    if (!m_sceneRenderer.InitTextured(m_renderPass, staging)) {
+        std::cerr << "[HeadlessRenderer] Failed to initialize textured rendering" << std::endl;
+        return false;
+    }
+
+    std::cout << "[HeadlessRenderer] Textured rendering initialized successfully" << std::endl;
+    return true;
+}
+
+bool HeadlessRenderer::CreateTestTexture(const uint8_t* data, uint32_t width, uint32_t height)
+{
+    if (!m_sceneRendererInitialized) {
+        return false;
+    }
+    return m_sceneRenderer.CreateTestTexture(data, width, height);
+}
+
+void HeadlessRenderer::RenderTexturedQuad()
+{
+    if (!m_sceneRenderer.IsTexturedInitialized()) {
+        return;
+    }
+
+    // Start render pass if not already started
+    if (!m_renderPassStarted) {
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
+    // Render the textured quad
+    m_sceneRenderer.RenderTexturedQuad(m_commandBuffer);
 }

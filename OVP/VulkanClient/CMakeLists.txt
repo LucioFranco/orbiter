@@ -83,6 +83,8 @@ add_library(VulkanCore STATIC
     Core/VulkanSwapchain.h
     Core/VulkanPipeline.cpp
     Core/VulkanPipeline.h
+    Core/TexturedPipeline.cpp
+    Core/TexturedPipeline.h
     Core/VulkanBuffer.cpp
     Core/VulkanBuffer.h
     Core/StagingManager.cpp

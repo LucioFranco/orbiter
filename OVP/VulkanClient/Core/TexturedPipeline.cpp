@@ -1,97 +1,35 @@
 // ==============================================================
-// VulkanPipeline.cpp
+// TexturedPipeline.cpp
 // Part of the ORBITER VISUALISATION PROJECT (OVP)
 // Dual licensed under GPL v3 and LGPL v3
 // Copyright (C) 2024
 // ==============================================================
 
-#include "VulkanPipeline.h"
+#include "TexturedPipeline.h"
+#include "VulkanPipeline.h"  // For TexturedVertex
+#include "VulkanDescriptors.h"
 #include <fstream>
 #include <array>
-#include <stdexcept>
 
 // SHADER_DIR is defined by CMake to point to the compiled shader directory
 #ifndef SHADER_DIR
 #define SHADER_DIR "."
 #endif
 
-// ============================================================
-// BasicVertex
-// ============================================================
-
-VkVertexInputBindingDescription BasicVertex::GetBindingDescription() {
-    VkVertexInputBindingDescription bindingDescription{};
-    bindingDescription.binding = 0;
-    bindingDescription.stride = sizeof(BasicVertex);
-    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    return bindingDescription;
-}
-
-std::array<VkVertexInputAttributeDescription, 2> BasicVertex::GetAttributeDescriptions() {
-    std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
-
-    // Position (location 0)
-    attributeDescriptions[0].binding = 0;
-    attributeDescriptions[0].location = 0;
-    attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[0].offset = offsetof(BasicVertex, position);
-
-    // Color (location 1)
-    attributeDescriptions[1].binding = 0;
-    attributeDescriptions[1].location = 1;
-    attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[1].offset = offsetof(BasicVertex, color);
-
-    return attributeDescriptions;
-}
-
-// ============================================================
-// TexturedVertex
-// ============================================================
-
-VkVertexInputBindingDescription TexturedVertex::GetBindingDescription() {
-    VkVertexInputBindingDescription bindingDescription{};
-    bindingDescription.binding = 0;
-    bindingDescription.stride = sizeof(TexturedVertex);
-    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    return bindingDescription;
-}
-
-std::array<VkVertexInputAttributeDescription, 2> TexturedVertex::GetAttributeDescriptions() {
-    std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
-
-    // Position (location 0)
-    attributeDescriptions[0].binding = 0;
-    attributeDescriptions[0].location = 0;
-    attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[0].offset = offsetof(TexturedVertex, position);
-
-    // Texture coordinates (location 1)
-    attributeDescriptions[1].binding = 0;
-    attributeDescriptions[1].location = 1;
-    attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;  // vec2
-    attributeDescriptions[1].offset = offsetof(TexturedVertex, texCoord);
-
-    return attributeDescriptions;
-}
-
-// ============================================================
-// VulkanPipeline
-// ============================================================
-
-VulkanPipeline::VulkanPipeline()
+TexturedPipeline::TexturedPipeline()
     : m_initialized(false)
     , m_ctx(nullptr)
+    , m_descriptorLayout(VK_NULL_HANDLE)
     , m_layout(VK_NULL_HANDLE)
     , m_pipeline(VK_NULL_HANDLE)
 {
 }
 
-VulkanPipeline::~VulkanPipeline() {
+TexturedPipeline::~TexturedPipeline() {
     Shutdown();
 }
 
-bool VulkanPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
+bool TexturedPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
     if (m_initialized) {
         return true;
     }
@@ -102,11 +40,22 @@ bool VulkanPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
     m_ctx = ctx;
     VkDevice device = ctx->GetDevice();
 
-    // Load compiled shaders
-    auto vertCode = LoadShaderFile(std::string(SHADER_DIR) + "/basic.vert.spv");
-    auto fragCode = LoadShaderFile(std::string(SHADER_DIR) + "/basic.frag.spv");
+    // Create descriptor set layout for texture sampler
+    VulkanDescriptorSetLayoutBuilder layoutBuilder;
+    layoutBuilder.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            VK_SHADER_STAGE_FRAGMENT_BIT, 1);
+    m_descriptorLayout = layoutBuilder.Build(ctx);
+    if (m_descriptorLayout == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    // Load compiled textured shaders
+    auto vertCode = LoadShaderFile(std::string(SHADER_DIR) + "/textured.vert.spv");
+    auto fragCode = LoadShaderFile(std::string(SHADER_DIR) + "/textured.frag.spv");
 
     if (vertCode.empty() || fragCode.empty()) {
+        vkDestroyDescriptorSetLayout(device, m_descriptorLayout, nullptr);
+        m_descriptorLayout = VK_NULL_HANDLE;
         return false;
     }
 
@@ -116,6 +65,8 @@ bool VulkanPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
     if (vertModule == VK_NULL_HANDLE || fragModule == VK_NULL_HANDLE) {
         if (vertModule) vkDestroyShaderModule(device, vertModule, nullptr);
         if (fragModule) vkDestroyShaderModule(device, fragModule, nullptr);
+        vkDestroyDescriptorSetLayout(device, m_descriptorLayout, nullptr);
+        m_descriptorLayout = VK_NULL_HANDLE;
         return false;
     }
 
@@ -134,9 +85,9 @@ bool VulkanPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
 
     VkPipelineShaderStageCreateInfo shaderStages[] = { vertStageInfo, fragStageInfo };
 
-    // Vertex input
-    auto bindingDescription = BasicVertex::GetBindingDescription();
-    auto attributeDescriptions = BasicVertex::GetAttributeDescriptions();
+    // Vertex input - use TexturedVertex format
+    auto bindingDescription = TexturedVertex::GetBindingDescription();
+    auto attributeDescriptions = TexturedVertex::GetAttributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -212,17 +163,19 @@ bool VulkanPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
     pushConstantRange.offset = 0;
     pushConstantRange.size = 64;  // sizeof(glm::mat4)
 
-    // Pipeline layout
+    // Pipeline layout with descriptor set for texture
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 0;
-    layoutInfo.pSetLayouts = nullptr;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &m_descriptorLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushConstantRange;
 
     if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_layout) != VK_SUCCESS) {
         vkDestroyShaderModule(device, vertModule, nullptr);
         vkDestroyShaderModule(device, fragModule, nullptr);
+        vkDestroyDescriptorSetLayout(device, m_descriptorLayout, nullptr);
+        m_descriptorLayout = VK_NULL_HANDLE;
         return false;
     }
 
@@ -253,6 +206,8 @@ bool VulkanPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
     if (result != VK_SUCCESS) {
         vkDestroyPipelineLayout(device, m_layout, nullptr);
         m_layout = VK_NULL_HANDLE;
+        vkDestroyDescriptorSetLayout(device, m_descriptorLayout, nullptr);
+        m_descriptorLayout = VK_NULL_HANDLE;
         return false;
     }
 
@@ -260,7 +215,7 @@ bool VulkanPipeline::Init(VulkanContext* ctx, VkRenderPass renderPass) {
     return true;
 }
 
-void VulkanPipeline::Shutdown() {
+void TexturedPipeline::Shutdown() {
     if (!m_initialized || !m_ctx) {
         return;
     }
@@ -277,11 +232,16 @@ void VulkanPipeline::Shutdown() {
         m_layout = VK_NULL_HANDLE;
     }
 
+    if (m_descriptorLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, m_descriptorLayout, nullptr);
+        m_descriptorLayout = VK_NULL_HANDLE;
+    }
+
     m_ctx = nullptr;
     m_initialized = false;
 }
 
-VkShaderModule VulkanPipeline::CreateShaderModule(const std::vector<uint32_t>& code) {
+VkShaderModule TexturedPipeline::CreateShaderModule(const std::vector<uint32_t>& code) {
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     createInfo.codeSize = code.size() * sizeof(uint32_t);
@@ -295,7 +255,7 @@ VkShaderModule VulkanPipeline::CreateShaderModule(const std::vector<uint32_t>& c
     return shaderModule;
 }
 
-std::vector<uint32_t> VulkanPipeline::LoadShaderFile(const std::string& filename) {
+std::vector<uint32_t> TexturedPipeline::LoadShaderFile(const std::string& filename) {
     std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
     if (!file.is_open()) {

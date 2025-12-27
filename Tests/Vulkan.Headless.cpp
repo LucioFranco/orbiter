@@ -15,6 +15,26 @@
 #include <imgui.h>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <iostream>
+
+// Save BGRA pixels to PPM file (converts to RGB)
+static bool SaveToPPM(const std::vector<uint8_t>& pixels, uint32_t width, uint32_t height, const char* filename) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) return false;
+
+    file << "P6\n" << width << " " << height << "\n255\n";
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            size_t idx = (y * width + x) * 4;
+            // BGRA -> RGB
+            file.put(static_cast<char>(pixels[idx + 2]));  // R
+            file.put(static_cast<char>(pixels[idx + 1]));  // G
+            file.put(static_cast<char>(pixels[idx + 0]));  // B
+        }
+    }
+    return true;
+}
 
 #define CATCH_CONFIG_MAIN
 #include "catch2/catch_all.hpp"
@@ -813,3 +833,227 @@ TEST_CASE("VulkanDescriptorWriter with texture", "[Vulkan][Headless][Texture]")
     texture.Destroy();
     renderer.Shutdown();
 }
+
+// ======================================================================
+// Textured Rendering Tests (Phase 5 - TexturedPipeline)
+// ======================================================================
+
+TEST_CASE("HeadlessRenderer textured rendering initialization", "[Vulkan][Headless][TexturedRendering]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+
+    SECTION("InitTexturedRendering succeeds") {
+        REQUIRE(renderer.InitTexturedRendering());
+    }
+
+    SECTION("Double initialization is safe") {
+        REQUIRE(renderer.InitTexturedRendering());
+        REQUIRE(renderer.InitTexturedRendering());  // Should return true
+    }
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("HeadlessRenderer textured quad renders", "[Vulkan][Headless][TexturedRendering]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitTexturedRendering());
+
+    // Render a textured quad
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);  // Black background
+    renderer.RenderTexturedQuad();
+    renderer.EndFrame();
+    renderer.Submit();
+
+    auto pixels = renderer.ReadPixels();
+    REQUIRE(pixels.size() == 256 * 256 * 4);
+
+    // Check that we rendered something (not all black)
+    // The default texture is a red/white checkerboard
+    int nonBlackPixels = 0;
+    for (size_t i = 0; i < 256 * 256; i++) {
+        size_t idx = i * 4;
+        if (pixels[idx] > 10 || pixels[idx + 1] > 10 || pixels[idx + 2] > 10) {
+            nonBlackPixels++;
+        }
+    }
+
+    INFO("Non-black pixels: " << nonBlackPixels);
+    // Quad should cover some area - expect at least a few hundred pixels
+    REQUIRE(nonBlackPixels > 100);
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("HeadlessRenderer custom texture rendering", "[Vulkan][Headless][TexturedRendering]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+
+    // Create a solid red texture BEFORE InitTexturedRendering
+    // This tests that CreateTestTexture works and is used by InitTextured
+    uint8_t redTexture[1 * 1 * 4] = { 255, 0, 0, 255 };  // 1x1 red
+    REQUIRE(renderer.CreateTestTexture(redTexture, 1, 1));
+
+    REQUIRE(renderer.InitTexturedRendering());
+
+    // Render the textured quad
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);  // Black background
+    renderer.RenderTexturedQuad();
+    renderer.EndFrame();
+    renderer.Submit();
+
+    auto pixels = renderer.ReadPixels();
+    REQUIRE(pixels.size() == 256 * 256 * 4);
+
+    // Check center pixel - should be red (from the 1x1 red texture)
+    auto center = BGRAPixel::FromBuffer(pixels, 128, 128, 256);
+    INFO("Center pixel: R=" << (int)center.r << " G=" << (int)center.g
+         << " B=" << (int)center.b << " A=" << (int)center.a);
+
+    // The center should be red (from our solid red texture)
+    // Use a generous tolerance since the quad may not be exactly centered
+    REQUIRE(center.r > 200);
+    REQUIRE(center.g < 50);
+    REQUIRE(center.b < 50);
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("HeadlessRenderer textured quad with checkerboard", "[Vulkan][Headless][TexturedRendering]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+
+    // Create a 2x2 checkerboard: red/blue pattern
+    uint8_t checkerboard[2 * 2 * 4] = {
+        255, 0, 0, 255,    0, 0, 255, 255,   // red, blue (top row)
+        0, 0, 255, 255,    255, 0, 0, 255    // blue, red (bottom row)
+    };
+    REQUIRE(renderer.CreateTestTexture(checkerboard, 2, 2));
+    REQUIRE(renderer.InitTexturedRendering());
+
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+    renderer.RenderTexturedQuad();
+    renderer.EndFrame();
+    renderer.Submit();
+
+    auto pixels = renderer.ReadPixels();
+
+    // Count red and blue pixels within the quad area
+    int redPixels = 0;
+    int bluePixels = 0;
+    int blackPixels = 0;
+
+    for (size_t y = 0; y < 256; y++) {
+        for (size_t x = 0; x < 256; x++) {
+            auto px = BGRAPixel::FromBuffer(pixels, x, y, 256);
+
+            if (px.r < 10 && px.g < 10 && px.b < 10) {
+                blackPixels++;
+            } else if (px.r > 128 && px.b < 128) {
+                redPixels++;
+            } else if (px.b > 128 && px.r < 128) {
+                bluePixels++;
+            }
+        }
+    }
+
+    INFO("Red pixels: " << redPixels);
+    INFO("Blue pixels: " << bluePixels);
+    INFO("Black pixels: " << blackPixels);
+
+    // Both red and blue should be present (checkerboard pattern)
+    // Due to texture filtering, the exact counts will vary
+    REQUIRE(redPixels > 50);
+    REQUIRE(bluePixels > 50);
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("HeadlessRenderer textured and colored triangle together", "[Vulkan][Headless][TexturedRendering]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitTexturedRendering());
+
+    // Render both the colored triangle and textured quad
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+    renderer.RenderScene();       // Colored triangle
+    renderer.RenderTexturedQuad();  // Textured quad (may overlap)
+    renderer.EndFrame();
+    renderer.Submit();
+
+    auto pixels = renderer.ReadPixels();
+
+    // Should have visible content from both renders
+    int nonBlackPixels = 0;
+    for (size_t i = 0; i < 256 * 256; i++) {
+        size_t idx = i * 4;
+        if (pixels[idx] > 10 || pixels[idx + 1] > 10 || pixels[idx + 2] > 10) {
+            nonBlackPixels++;
+        }
+    }
+
+    INFO("Non-black pixels: " << nonBlackPixels);
+    // Combined rendering should produce significant visible content
+    REQUIRE(nonBlackPixels > 500);
+
+    renderer.Shutdown();
+}
+
+// ======================================================================
+// Image Export Test - saves rendered images as PPM files
+// ======================================================================
+
+TEST_CASE("Export rendered images to PPM", "[.][Export]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+
+    // 1. Colored triangle
+    renderer.BeginFrame();
+    renderer.Clear(0.1f, 0.1f, 0.2f, 1.0f);  // Dark blue background
+    renderer.RenderScene();
+    renderer.EndFrame();
+    renderer.Submit();
+    auto pixels1 = renderer.ReadPixels();
+    REQUIRE(SaveToPPM(pixels1, 256, 256, "render_triangle.ppm"));
+    INFO("Saved: render_triangle.ppm");
+
+    // 2. Textured quad with default checkerboard
+    REQUIRE(renderer.InitTexturedRendering());
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+    renderer.RenderTexturedQuad();
+    renderer.EndFrame();
+    renderer.Submit();
+    auto pixels2 = renderer.ReadPixels();
+    REQUIRE(SaveToPPM(pixels2, 256, 256, "render_textured_quad.ppm"));
+    INFO("Saved: render_textured_quad.ppm");
+
+    // 3. Both together
+    renderer.BeginFrame();
+    renderer.Clear(0.05f, 0.05f, 0.1f, 1.0f);
+    renderer.RenderScene();
+    renderer.RenderTexturedQuad();
+    renderer.EndFrame();
+    renderer.Submit();
+    auto pixels3 = renderer.ReadPixels();
+    REQUIRE(SaveToPPM(pixels3, 256, 256, "render_combined.ppm"));
+    INFO("Saved: render_combined.ppm");
+
+    renderer.Shutdown();
+
+    std::cout << "\n=== Images saved to build directory ===" << std::endl;
+    std::cout << "  - render_triangle.ppm" << std::endl;
+    std::cout << "  - render_textured_quad.ppm" << std::endl;
+    std::cout << "  - render_combined.ppm" << std::endl;
+}
+

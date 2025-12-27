@@ -11,6 +11,7 @@
 #include "OrbiterAPI.h"
 #include <vulkan/vulkan_win32.h>
 #include <array>
+#include <dinput.h>  // For DIK_* key codes
 
 // ImGui includes
 #include <imgui.h>
@@ -108,21 +109,7 @@ HWND VulkanClient::clbkCreateRenderWindow()
     // Set window title to indicate Vulkan is working
     SetWindowText(hWnd, "[VulkanClient]");
 
-    // VulkanClient defaults to 1080p window size
-    const uint32_t targetWidth = 1920;
-    const uint32_t targetHeight = 1080;
-
-    // Resize window to 1080p (calculate window size from client size)
-    RECT windowRect = { 0, 0, static_cast<LONG>(targetWidth), static_cast<LONG>(targetHeight) };
-    DWORD style = GetWindowLong(hWnd, GWL_STYLE);
-    DWORD exStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
-    AdjustWindowRectEx(&windowRect, style, FALSE, exStyle);
-
-    int windowWidth = windowRect.right - windowRect.left;
-    int windowHeight = windowRect.bottom - windowRect.top;
-    SetWindowPos(hWnd, NULL, 0, 0, windowWidth, windowHeight, SWP_NOMOVE | SWP_NOZORDER);
-
-    // Get actual window size after resize
+    // Use window size from base class (same as D3D9Client)
     RECT rect;
     GetClientRect(hWnd, &rect);
     m_viewportWidth = rect.right - rect.left;
@@ -199,6 +186,11 @@ HWND VulkanClient::clbkCreateRenderWindow()
     }
 
     oapiWriteLog(const_cast<char*>("VulkanClient: Render window ready"));
+
+    // Ensure window has focus after all initialization (important for DirectInput)
+    SetForegroundWindow(hWnd);
+    SetFocus(hWnd);
+
     return hWnd;
 }
 
@@ -229,13 +221,92 @@ void VulkanClient::clbkDestroyRenderWindow(bool fastclose)
     GraphicsClient::clbkDestroyRenderWindow(fastclose);
 }
 
+void VulkanClient::clbkUpdate(bool running)
+{
+    // Nothing special needed here currently
+}
+
+bool VulkanClient::clbkProcessKeyboardImmediate(char kstate[256], bool simRunning)
+{
+    // Workaround: DirectInput doesn't work with VulkanClient window, so we poll
+    // keyboard state using GetAsyncKeyState and inject directly into kstate.
+    // This callback is called DURING UserInput() so we can modify kstate directly.
+    bool anyKey = false;
+
+    // Poll common keys and convert to DirectInput format (0x80 = pressed)
+    // Arrow keys for camera - directly rotate camera for faster response
+    // Rotation speed in radians per frame (0.05 rad ≈ 3 degrees)
+    const double rotSpeed = 0.05;
+
+    if (GetAsyncKeyState(VK_LEFT) & 0x8000) {
+        kstate[DIK_LEFT] |= 0x80;
+        oapiCameraRotAzimuth(-rotSpeed);  // Rotate left
+        anyKey = true;
+    }
+    if (GetAsyncKeyState(VK_RIGHT) & 0x8000) {
+        kstate[DIK_RIGHT] |= 0x80;
+        oapiCameraRotAzimuth(rotSpeed);   // Rotate right
+        anyKey = true;
+    }
+    if (GetAsyncKeyState(VK_UP) & 0x8000) {
+        kstate[DIK_UP] |= 0x80;
+        oapiCameraRotPolar(-rotSpeed);    // Rotate up
+        anyKey = true;
+    }
+    if (GetAsyncKeyState(VK_DOWN) & 0x8000) {
+        kstate[DIK_DOWN] |= 0x80;
+        oapiCameraRotPolar(rotSpeed);     // Rotate down
+        anyKey = true;
+    }
+
+    // Modifier keys (always check, don't set anyKey)
+    if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   { kstate[DIK_LSHIFT] |= 0x80; }
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) { kstate[DIK_LCONTROL] |= 0x80; }
+    if (GetAsyncKeyState(VK_MENU) & 0x8000)    { kstate[DIK_LALT] |= 0x80; }
+
+    // Common function keys
+    if (GetAsyncKeyState(VK_F1) & 0x8000) { kstate[DIK_F1] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F2) & 0x8000) { kstate[DIK_F2] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F3) & 0x8000) { kstate[DIK_F3] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F4) & 0x8000) { kstate[DIK_F4] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F5) & 0x8000) { kstate[DIK_F5] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F6) & 0x8000) { kstate[DIK_F6] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F7) & 0x8000) { kstate[DIK_F7] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F8) & 0x8000) { kstate[DIK_F8] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_F9) & 0x8000) { kstate[DIK_F9] |= 0x80; anyKey = true; }
+
+    // R/T keys for time warp
+    if (GetAsyncKeyState('R') & 0x8000) { kstate[DIK_R] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState('T') & 0x8000) { kstate[DIK_T] |= 0x80; anyKey = true; }
+
+    // Page up/down for zoom
+    if (GetAsyncKeyState(VK_PRIOR) & 0x8000) { kstate[DIK_PRIOR] |= 0x80; anyKey = true; }
+    if (GetAsyncKeyState(VK_NEXT) & 0x8000)  { kstate[DIK_NEXT] |= 0x80; anyKey = true; }
+
+    // Debug logging - log every key event (rate limited)
+    if (anyKey) {
+        static int keyLogCount = 0;
+        if (keyLogCount < 20) {
+            char buf[128];
+            sprintf(buf, "KEY: L:%d R:%d U:%d D:%d  SimRunning:%d",
+                (kstate[DIK_LEFT] & 0x80) != 0, (kstate[DIK_RIGHT] & 0x80) != 0,
+                (kstate[DIK_UP] & 0x80) != 0, (kstate[DIK_DOWN] & 0x80) != 0,
+                simRunning ? 1 : 0);
+            oapiWriteLog(buf);
+            keyLogCount++;
+        }
+    }
+
+    return false;  // Don't consume - let Orbiter process the keys
+}
+
 void VulkanClient::clbkRenderScene()
 {
     static int frameCount = 0;
     frameCount++;
 
-    // Log first 5 calls unconditionally to debug
-    if (frameCount <= 5) {
+    // Log first 5 and then periodically to verify rendering continues
+    if (frameCount <= 5 || frameCount % 500 == 0) {
         char buf[128];
         sprintf(buf, "VulkanClient: clbkRenderScene called (frame %d, swapchain=%d)",
             frameCount, m_swapchain.IsInitialized());
@@ -244,6 +315,32 @@ void VulkanClient::clbkRenderScene()
 
     if (!m_swapchain.IsInitialized()) {
         return;
+    }
+
+    // Update camera from Orbiter
+    if (m_sceneRendererInitialized) {
+        MATRIX3 rotMatrix;
+        oapiCameraRotationMatrix(&rotMatrix);
+        double aperture = oapiCameraAperture();
+
+        // Debug: log camera info when it changes
+        static double lastM11 = 0, lastM12 = 0, lastM13 = 0;
+        if (fabs(rotMatrix.m11 - lastM11) > 0.001 ||
+            fabs(rotMatrix.m12 - lastM12) > 0.001 ||
+            fabs(rotMatrix.m13 - lastM13) > 0.001) {
+            char buf[256];
+            sprintf(buf, "CAM: rot[0]=(%.3f,%.3f,%.3f) aperture=%.1f deg",
+                rotMatrix.m11, rotMatrix.m12, rotMatrix.m13, aperture * 180.0 / 3.14159);
+            oapiWriteLog(buf);
+            lastM11 = rotMatrix.m11;
+            lastM12 = rotMatrix.m12;
+            lastM13 = rotMatrix.m13;
+        }
+
+        // Pass to scene renderer - uses rotation matrix directly
+        // Near plane: 1m (reasonable for spacecraft)
+        // Far plane: 1e9m (to see distant planets/stars)
+        m_sceneRenderer.SetCameraFromOrbiter(rotMatrix.data, aperture, 1.0, 1e9);
     }
 
     // Acquire next swapchain image
@@ -331,10 +428,10 @@ bool VulkanClient::clbkDisplayFrame()
     static int displayCount = 0;
     displayCount++;
 
-    // Log first 5 calls unconditionally to debug
-    if (displayCount <= 5) {
+    // Log periodically to monitor rendering
+    if (displayCount <= 5 || displayCount % 500 == 0) {
         char buf[128];
-        sprintf(buf, "VulkanClient: clbkDisplayFrame called (frame %d, init=%d, inProgress=%d)",
+        sprintf(buf, "FRAME: %d (swapchain=%d, inProgress=%d)",
             displayCount, m_swapchain.IsInitialized(), m_frameInProgress);
         oapiWriteLog(buf);
     }

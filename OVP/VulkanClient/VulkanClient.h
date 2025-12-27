@@ -43,8 +43,12 @@ public:
     void clbkDestroyRenderWindow(bool fastclose) override;
 
     // GraphicsClient interface overrides - Rendering
+    void clbkUpdate(bool running) override;
     void clbkRenderScene() override;
     bool clbkDisplayFrame() override;
+
+    // Module interface overrides - Input
+    bool clbkProcessKeyboardImmediate(char kstate[256], bool simRunning) override;
 
     // GraphicsClient interface overrides - Info
     bool clbkFullscreenMode() const override { return false; }

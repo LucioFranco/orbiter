@@ -38,11 +38,17 @@ public:
     void EndFrame();
     void Submit();
 
+    // Textured rendering (for testing texture pipeline)
+    bool InitTexturedRendering();
+    bool CreateTestTexture(const uint8_t* data, uint32_t width, uint32_t height);
+    void RenderTexturedQuad();
+
     // Readback
     std::vector<uint8_t> ReadPixels();
 
     // RenderDoc integration
     bool IsRenderDocAvailable() const { return m_renderDocApi != nullptr; }
+    void SetCaptureFilePath(const char* pathTemplate);  // Set path for captures (e.g., "captures/test")
     void StartCapture();
     void EndCapture();
     uint32_t GetCaptureCount() const;
