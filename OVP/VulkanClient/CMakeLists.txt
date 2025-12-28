@@ -68,6 +68,8 @@ compile_shader(${VULKAN_SOURCE_DIR}/Shaders/basic.vert)
 compile_shader(${VULKAN_SOURCE_DIR}/Shaders/basic.frag)
 compile_shader(${VULKAN_SOURCE_DIR}/Shaders/textured.vert)
 compile_shader(${VULKAN_SOURCE_DIR}/Shaders/textured.frag)
+compile_shader(${VULKAN_SOURCE_DIR}/Shaders/mesh.vert)
+compile_shader(${VULKAN_SOURCE_DIR}/Shaders/mesh.frag)
 
 # Create custom target for shaders
 add_custom_target(VulkanShaders DEPENDS ${SHADER_SPV_FILES})
@@ -93,11 +95,19 @@ add_library(VulkanCore STATIC
     Core/SceneRenderer.h
     Core/VulkanTexture.cpp
     Core/VulkanTexture.h
+    Core/DDSLoader.cpp
+    Core/DDSLoader.h
     Core/VulkanDescriptors.cpp
     Core/VulkanDescriptors.h
     Core/VulkanMemory.h
     Core/RenderPassFactory.cpp
     Core/RenderPassFactory.h
+    Core/MeshPipeline.cpp
+    Core/MeshPipeline.h
+    Mesh/VulkanMesh.cpp
+    Mesh/VulkanMesh.h
+    Resources/TextureManager.cpp
+    Resources/TextureManager.h
 )
 
 target_include_directories(VulkanCore PUBLIC
@@ -225,6 +235,53 @@ add_dependencies(VulkanClient
 )
 
 install(TARGETS VulkanClient
+    LIBRARY
+    DESTINATION ${ORBITER_INSTALL_PLUGIN_DIR}
+)
+
+# HeadlessGraphicsClient - GraphicsClient using HeadlessRenderer for testing
+add_library(HeadlessGraphicsClient MODULE
+    HeadlessGraphicsClient.cpp
+    HeadlessGraphicsClient.h
+)
+
+target_include_directories(HeadlessGraphicsClient PUBLIC
+    ${ORBITER_SOURCE_SDK_INCLUDE_DIR}
+    ${Vulkan_INCLUDE_DIRS}
+    ${VULKAN_SOURCE_DIR}
+)
+
+target_link_directories(HeadlessGraphicsClient PUBLIC
+    ${ORBITER_BINARY_SDK_DIR}/lib
+)
+
+target_link_libraries(HeadlessGraphicsClient
+    HeadlessRenderer
+    ${ORBITER_LIB}
+)
+
+# Force include all symbols from Orbitersdk (needed for DllMain entry point)
+target_link_options(HeadlessGraphicsClient PRIVATE
+    /WHOLEARCHIVE:$<TARGET_FILE:Orbitersdk>
+)
+
+target_compile_definitions(HeadlessGraphicsClient PRIVATE
+    HEADLESSGRAPHICSCLIENT_EXPORTS
+)
+
+set_target_properties(HeadlessGraphicsClient
+    PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/Modules/Plugin
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/Modules/Plugin
+    FOLDER OVP
+)
+
+add_dependencies(HeadlessGraphicsClient
+    ${OrbiterTgt}
+    Orbitersdk
+)
+
+install(TARGETS HeadlessGraphicsClient
     LIBRARY
     DESTINATION ${ORBITER_INSTALL_PLUGIN_DIR}
 )

@@ -215,19 +215,47 @@ bool StagingManager::UploadImage(VkImage dstImage, const void* data, uint32_t wi
         return false;
     }
 
-    // Calculate size based on format (assuming RGBA8 for now)
-    VkDeviceSize bytesPerPixel = 4;  // For VK_FORMAT_R8G8B8A8_UNORM/SRGB
-    if (format == VK_FORMAT_R8_UNORM) {
-        bytesPerPixel = 1;
-    } else if (format == VK_FORMAT_R8G8_UNORM) {
-        bytesPerPixel = 2;
-    } else if (format == VK_FORMAT_R16G16B16A16_SFLOAT) {
-        bytesPerPixel = 8;
-    } else if (format == VK_FORMAT_R32G32B32A32_SFLOAT) {
-        bytesPerPixel = 16;
-    }
+    // Calculate size based on format
+    VkDeviceSize imageSize = 0;
 
-    VkDeviceSize imageSize = width * height * bytesPerPixel;
+    // BC (block compressed) formats: size is based on 4x4 blocks
+    switch (format) {
+        case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: {
+            // BC1: 8 bytes per 4x4 block (0.5 bytes per pixel)
+            uint32_t blocksX = (width + 3) / 4;
+            uint32_t blocksY = (height + 3) / 4;
+            imageSize = static_cast<VkDeviceSize>(blocksX) * blocksY * 8;
+            break;
+        }
+        case VK_FORMAT_BC2_UNORM_BLOCK:
+        case VK_FORMAT_BC2_SRGB_BLOCK:
+        case VK_FORMAT_BC3_UNORM_BLOCK:
+        case VK_FORMAT_BC3_SRGB_BLOCK: {
+            // BC2/BC3: 16 bytes per 4x4 block (1 byte per pixel)
+            uint32_t blocksX = (width + 3) / 4;
+            uint32_t blocksY = (height + 3) / 4;
+            imageSize = static_cast<VkDeviceSize>(blocksX) * blocksY * 16;
+            break;
+        }
+        default: {
+            // Uncompressed formats: size based on bytes per pixel
+            VkDeviceSize bytesPerPixel = 4;  // Default: RGBA8
+            if (format == VK_FORMAT_R8_UNORM) {
+                bytesPerPixel = 1;
+            } else if (format == VK_FORMAT_R8G8_UNORM) {
+                bytesPerPixel = 2;
+            } else if (format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+                bytesPerPixel = 8;
+            } else if (format == VK_FORMAT_R32G32B32A32_SFLOAT) {
+                bytesPerPixel = 16;
+            }
+            imageSize = width * height * bytesPerPixel;
+            break;
+        }
+    }
 
     // Check if data fits in remaining staging space
     if (m_stagingOffset + imageSize > m_stagingSize) {
@@ -250,8 +278,9 @@ bool StagingManager::UploadImage(VkImage dstImage, const void* data, uint32_t wi
     memcpy(static_cast<char*>(m_mappedData) + m_stagingOffset, data, imageSize);
 
     // Transition image to TRANSFER_DST_OPTIMAL and copy
-    // Use VK_KHR_synchronization2 if available for clearer semantics
-    if (m_ctx->HasSynchronization2()) {
+    // NOTE: Disabled sync2 path - vkCmdPipelineBarrier2 crashes on some systems
+    // even when the extension is reported as supported. Using legacy barrier path.
+    if (false && m_ctx->HasSynchronization2()) {
         // Pre-copy barrier: undefined -> transfer dst
         VkImageMemoryBarrier2 barrier2{};
         barrier2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;

@@ -90,6 +90,7 @@ HeadlessRenderer::HeadlessRenderer()
     , m_imguiInitialized(false)
     , m_renderPassStarted(false)
     , m_sceneRendererInitialized(false)
+    , m_meshPipelineInitialized(false)
 {
     m_clearColor[0] = 0.0f;
     m_clearColor[1] = 0.0f;
@@ -208,6 +209,12 @@ void HeadlessRenderer::Shutdown()
     if (m_sceneRendererInitialized) {
         m_sceneRenderer.Shutdown();
         m_sceneRendererInitialized = false;
+    }
+
+    // Shutdown MeshPipeline
+    if (m_meshPipelineInitialized) {
+        m_meshPipeline.Shutdown();
+        m_meshPipelineInitialized = false;
     }
 
     // Shutdown ImGui (before destroying Vulkan resources)
@@ -888,4 +895,482 @@ void HeadlessRenderer::RenderTexturedQuad()
 
     // Render the textured quad
     m_sceneRenderer.RenderTexturedQuad(m_commandBuffer);
+}
+
+// ======================================================================
+// Mesh rendering
+// ======================================================================
+
+bool HeadlessRenderer::InitMeshRendering()
+{
+    if (!m_initialized) {
+        std::cerr << "[HeadlessRenderer] Cannot init mesh rendering - renderer not initialized" << std::endl;
+        return false;
+    }
+
+    if (m_meshPipelineInitialized) {
+        return true;  // Already initialized
+    }
+
+    if (!m_meshPipeline.Init(&m_ctx, m_renderPass, &m_stagingManager)) {
+        std::cerr << "[HeadlessRenderer] Failed to initialize mesh pipeline" << std::endl;
+        return false;
+    }
+
+    m_meshPipelineInitialized = true;
+    std::cout << "[HeadlessRenderer] Mesh pipeline initialized successfully" << std::endl;
+    return true;
+}
+
+void HeadlessRenderer::RenderMesh(VulkanMesh* mesh, const float* mvp, const float* model, const float* lightDir,
+                                   const float* matDiffuse, const float* matEmissive)
+{
+    if (!m_meshPipelineInitialized || !mesh || !mesh->IsUploaded()) {
+        return;
+    }
+
+    // Start render pass if not already started
+    if (!m_renderPassStarted) {
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
+    // Set viewport and scissor
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(m_width);
+    viewport.height = static_cast<float>(m_height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = { m_width, m_height };
+    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+
+    // Bind mesh pipeline
+    vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_meshPipeline.GetPipeline());
+
+    // Bind default texture descriptor set (used when no custom texture is bound)
+    VkDescriptorSet defaultTexDesc = m_meshPipeline.GetDefaultTextureDescriptor();
+    if (defaultTexDesc != VK_NULL_HANDLE) {
+        vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_meshPipeline.GetLayout(), 0, 1, &defaultTexDesc, 0, nullptr);
+    }
+
+    // Set push constants
+    MeshPushConstants pushConstants;
+    memcpy(pushConstants.mvp, mvp, sizeof(float) * 16);
+    memcpy(pushConstants.model, model, sizeof(float) * 16);
+    memcpy(pushConstants.lightDir, lightDir, sizeof(float) * 4);
+
+    // Material properties (default to gray if not provided)
+    if (matDiffuse) {
+        memcpy(pushConstants.matDiffuse, matDiffuse, sizeof(float) * 4);
+    } else {
+        // Default gray diffuse (alpha=0 signals shader to use default)
+        pushConstants.matDiffuse[0] = 0.7f;
+        pushConstants.matDiffuse[1] = 0.7f;
+        pushConstants.matDiffuse[2] = 0.7f;
+        pushConstants.matDiffuse[3] = 0.0f;  // alpha=0 means use default
+    }
+
+    if (matEmissive) {
+        memcpy(pushConstants.matEmissive, matEmissive, sizeof(float) * 4);
+    } else {
+        // Default: no emission
+        pushConstants.matEmissive[0] = 0.0f;
+        pushConstants.matEmissive[1] = 0.0f;
+        pushConstants.matEmissive[2] = 0.0f;
+        pushConstants.matEmissive[3] = 0.0f;
+    }
+
+    vkCmdPushConstants(m_commandBuffer, m_meshPipeline.GetLayout(),
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(MeshPushConstants), &pushConstants);
+
+    // Bind and draw mesh
+    mesh->Bind(m_commandBuffer);
+    mesh->DrawAll(m_commandBuffer);
+}
+
+void HeadlessRenderer::RenderMeshGroup(VulkanMesh* mesh, uint32_t groupIdx,
+                                        const float* mvp, const float* model, const float* lightDir,
+                                        const float* matDiffuse, const float* matEmissive)
+{
+    if (!m_meshPipelineInitialized || !mesh || !mesh->IsUploaded()) {
+        return;
+    }
+    if (groupIdx >= mesh->GetGroupCount()) {
+        return;
+    }
+
+    // Start render pass if not already started
+    if (!m_renderPassStarted) {
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
+    // Set viewport and scissor
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(m_width);
+    viewport.height = static_cast<float>(m_height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = { m_width, m_height };
+    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+
+    // Bind mesh pipeline
+    vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_meshPipeline.GetPipeline());
+
+    // Bind default texture descriptor set
+    VkDescriptorSet defaultTexDesc = m_meshPipeline.GetDefaultTextureDescriptor();
+    if (defaultTexDesc != VK_NULL_HANDLE) {
+        vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_meshPipeline.GetLayout(), 0, 1, &defaultTexDesc, 0, nullptr);
+    }
+
+    // Set push constants
+    MeshPushConstants pushConstants;
+    memcpy(pushConstants.mvp, mvp, sizeof(float) * 16);
+    memcpy(pushConstants.model, model, sizeof(float) * 16);
+    memcpy(pushConstants.lightDir, lightDir, sizeof(float) * 4);
+
+    // Material properties
+    if (matDiffuse) {
+        memcpy(pushConstants.matDiffuse, matDiffuse, sizeof(float) * 4);
+    } else {
+        pushConstants.matDiffuse[0] = 0.7f;
+        pushConstants.matDiffuse[1] = 0.7f;
+        pushConstants.matDiffuse[2] = 0.7f;
+        pushConstants.matDiffuse[3] = 0.0f;
+    }
+
+    if (matEmissive) {
+        memcpy(pushConstants.matEmissive, matEmissive, sizeof(float) * 4);
+    } else {
+        pushConstants.matEmissive[0] = 0.0f;
+        pushConstants.matEmissive[1] = 0.0f;
+        pushConstants.matEmissive[2] = 0.0f;
+        pushConstants.matEmissive[3] = 0.0f;
+    }
+
+    vkCmdPushConstants(m_commandBuffer, m_meshPipeline.GetLayout(),
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(MeshPushConstants), &pushConstants);
+
+    // Bind and draw single group
+    mesh->Bind(m_commandBuffer);
+    mesh->DrawGroup(m_commandBuffer, groupIdx);
+}
+
+void HeadlessRenderer::RenderMeshGroupTextured(VulkanMesh* mesh, uint32_t groupIdx,
+                                                const float* mvp, const float* model, const float* lightDir,
+                                                VkDescriptorSet textureDescriptor,
+                                                const float* matDiffuse, const float* matEmissive)
+{
+    if (!m_meshPipelineInitialized || !mesh || !mesh->IsUploaded()) {
+        return;
+    }
+    if (groupIdx >= mesh->GetGroupCount()) {
+        return;
+    }
+
+    // Start render pass if not already started
+    if (!m_renderPassStarted) {
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
+    // Set viewport and scissor
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(m_width);
+    viewport.height = static_cast<float>(m_height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = { m_width, m_height };
+    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+
+    // Bind mesh pipeline
+    vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_meshPipeline.GetPipeline());
+
+    // Bind custom texture descriptor set (or default if null)
+    VkDescriptorSet texDesc = textureDescriptor;
+    if (texDesc == VK_NULL_HANDLE) {
+        texDesc = m_meshPipeline.GetDefaultTextureDescriptor();
+    }
+    if (texDesc != VK_NULL_HANDLE) {
+        vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_meshPipeline.GetLayout(), 0, 1, &texDesc, 0, nullptr);
+    }
+
+    // Set push constants
+    MeshPushConstants pushConstants;
+    memcpy(pushConstants.mvp, mvp, sizeof(float) * 16);
+    memcpy(pushConstants.model, model, sizeof(float) * 16);
+    memcpy(pushConstants.lightDir, lightDir, sizeof(float) * 4);
+
+    // Material properties
+    if (matDiffuse) {
+        memcpy(pushConstants.matDiffuse, matDiffuse, sizeof(float) * 4);
+    } else {
+        pushConstants.matDiffuse[0] = 0.7f;
+        pushConstants.matDiffuse[1] = 0.7f;
+        pushConstants.matDiffuse[2] = 0.7f;
+        pushConstants.matDiffuse[3] = 0.0f;
+    }
+
+    if (matEmissive) {
+        memcpy(pushConstants.matEmissive, matEmissive, sizeof(float) * 4);
+    } else {
+        pushConstants.matEmissive[0] = 0.0f;
+        pushConstants.matEmissive[1] = 0.0f;
+        pushConstants.matEmissive[2] = 0.0f;
+        pushConstants.matEmissive[3] = 0.0f;
+    }
+
+    vkCmdPushConstants(m_commandBuffer, m_meshPipeline.GetLayout(),
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(MeshPushConstants), &pushConstants);
+
+    // Bind and draw single group
+    mesh->Bind(m_commandBuffer);
+    mesh->DrawGroup(m_commandBuffer, groupIdx);
+}
+
+void HeadlessRenderer::RenderMeshTextured(VulkanMesh* mesh, const float* mvp, const float* model, const float* lightDir,
+                                          VkDescriptorSet textureDescriptor, const float* matDiffuse)
+{
+    if (!m_meshPipelineInitialized || !mesh || !mesh->IsUploaded()) {
+        return;
+    }
+
+    // Start render pass if not already started
+    if (!m_renderPassStarted) {
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+        clearValues[1].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo rpBegin{};
+        rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpBegin.renderPass = m_renderPass;
+        rpBegin.framebuffer = m_framebuffer;
+        rpBegin.renderArea.offset = { 0, 0 };
+        rpBegin.renderArea.extent = { m_width, m_height };
+        rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        rpBegin.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+        m_renderPassStarted = true;
+    }
+
+    // Set viewport and scissor
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(m_width);
+    viewport.height = static_cast<float>(m_height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = { m_width, m_height };
+    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+
+    // Bind mesh pipeline
+    vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_meshPipeline.GetPipeline());
+
+    // Bind custom texture descriptor set
+    if (textureDescriptor != VK_NULL_HANDLE) {
+        vkCmdBindDescriptorSets(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_meshPipeline.GetLayout(), 0, 1, &textureDescriptor, 0, nullptr);
+    }
+
+    // Set push constants
+    MeshPushConstants pushConstants;
+    memcpy(pushConstants.mvp, mvp, sizeof(float) * 16);
+    memcpy(pushConstants.model, model, sizeof(float) * 16);
+    memcpy(pushConstants.lightDir, lightDir, sizeof(float) * 4);
+
+    // Material properties (default to white for textured rendering)
+    if (matDiffuse) {
+        memcpy(pushConstants.matDiffuse, matDiffuse, sizeof(float) * 4);
+    } else {
+        // Default white diffuse for textured meshes
+        pushConstants.matDiffuse[0] = 1.0f;
+        pushConstants.matDiffuse[1] = 1.0f;
+        pushConstants.matDiffuse[2] = 1.0f;
+        pushConstants.matDiffuse[3] = 1.0f;
+    }
+
+    // Emissive: zero RGB, hasTexture = 1.0 in w component
+    pushConstants.matEmissive[0] = 0.0f;
+    pushConstants.matEmissive[1] = 0.0f;
+    pushConstants.matEmissive[2] = 0.0f;
+    pushConstants.matEmissive[3] = 1.0f;  // hasTexture = 1.0
+
+    vkCmdPushConstants(m_commandBuffer, m_meshPipeline.GetLayout(),
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(MeshPushConstants), &pushConstants);
+
+    // Bind and draw mesh
+    mesh->Bind(m_commandBuffer);
+    mesh->DrawAll(m_commandBuffer);
+}
+
+VkDescriptorSet HeadlessRenderer::CreateMeshTestTexture(const uint8_t* rgba, uint32_t width, uint32_t height,
+                                                        VkImage* outImage, VmaAllocation* outAlloc,
+                                                        VkImageView* outView, VkSampler* outSampler)
+{
+    if (!m_meshPipelineInitialized || !m_stagingManager.IsInitialized()) {
+        return VK_NULL_HANDLE;
+    }
+
+    VkDevice device = m_ctx.GetDevice();
+    VmaAllocator allocator = m_ctx.GetAllocator();
+
+    // Create image
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = width;
+    imageInfo.extent.height = height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    VkImage image;
+    VmaAllocation alloc;
+    if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image, &alloc, nullptr) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+
+    // Upload texture data
+    if (!m_stagingManager.UploadImage(image, rgba, width, height, VK_FORMAT_R8G8B8A8_UNORM)) {
+        vmaDestroyImage(allocator, image, alloc);
+        return VK_NULL_HANDLE;
+    }
+    m_stagingManager.Flush();
+
+    // Create image view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    VkImageView imageView;
+    if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
+        vmaDestroyImage(allocator, image, alloc);
+        return VK_NULL_HANDLE;
+    }
+
+    // Create sampler
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_FALSE;
+    samplerInfo.maxAnisotropy = 1.0f;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+    VkSampler sampler;
+    if (vkCreateSampler(device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS) {
+        vkDestroyImageView(device, imageView, nullptr);
+        vmaDestroyImage(allocator, image, alloc);
+        return VK_NULL_HANDLE;
+    }
+
+    // Allocate descriptor set
+    VkDescriptorSet descriptorSet = m_meshPipeline.AllocateTextureDescriptor(imageView, sampler);
+    if (descriptorSet == VK_NULL_HANDLE) {
+        vkDestroySampler(device, sampler, nullptr);
+        vkDestroyImageView(device, imageView, nullptr);
+        vmaDestroyImage(allocator, image, alloc);
+        return VK_NULL_HANDLE;
+    }
+
+    // Output handles
+    *outImage = image;
+    *outAlloc = alloc;
+    *outView = imageView;
+    *outSampler = sampler;
+
+    return descriptorSet;
 }

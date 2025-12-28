@@ -14,6 +14,8 @@
 #include "Core/VulkanContext.h"
 #include "Core/StagingManager.h"
 #include "Core/SceneRenderer.h"
+#include "Core/MeshPipeline.h"
+#include "Mesh/VulkanMesh.h"
 #include <vector>
 #include <string>
 #include <cstdint>
@@ -43,6 +45,32 @@ public:
     bool CreateTestTexture(const uint8_t* data, uint32_t width, uint32_t height);
     void RenderTexturedQuad();
 
+    // Mesh rendering
+    bool InitMeshRendering();
+    bool IsMeshRenderingInitialized() const { return m_meshPipelineInitialized; }
+    MeshPipeline* GetMeshPipeline() { return &m_meshPipeline; }
+    VkCommandBuffer GetCurrentCommandBuffer() const { return m_commandBuffer; }
+    VkRenderPass GetRenderPass() const { return m_renderPass; }
+    // Render mesh with material support (diffuse RGBA, emissive RGB)
+    void RenderMesh(VulkanMesh* mesh, const float* mvp, const float* model, const float* lightDir,
+                    const float* matDiffuse = nullptr, const float* matEmissive = nullptr);
+    // Render a single mesh group with material (for per-group material rendering)
+    void RenderMeshGroup(VulkanMesh* mesh, uint32_t groupIdx,
+                         const float* mvp, const float* model, const float* lightDir,
+                         const float* matDiffuse = nullptr, const float* matEmissive = nullptr);
+    // Render a single mesh group with custom texture (for per-group textured rendering)
+    void RenderMeshGroupTextured(VulkanMesh* mesh, uint32_t groupIdx,
+                                 const float* mvp, const float* model, const float* lightDir,
+                                 VkDescriptorSet textureDescriptor,
+                                 const float* matDiffuse = nullptr, const float* matEmissive = nullptr);
+    // Render mesh with custom texture descriptor
+    void RenderMeshTextured(VulkanMesh* mesh, const float* mvp, const float* model, const float* lightDir,
+                            VkDescriptorSet textureDescriptor, const float* matDiffuse = nullptr);
+    // Create a test texture and return its descriptor set (caller owns the texture memory)
+    VkDescriptorSet CreateMeshTestTexture(const uint8_t* rgba, uint32_t width, uint32_t height,
+                                          VkImage* outImage, VmaAllocation* outAlloc,
+                                          VkImageView* outView, VkSampler* outSampler);
+
     // Readback
     std::vector<uint8_t> ReadPixels();
 
@@ -59,7 +87,8 @@ public:
     uint32_t GetWidth() const { return m_width; }
     uint32_t GetHeight() const { return m_height; }
 
-    // Access to staging manager (for advanced usage)
+    // Access to internal components (for advanced usage)
+    VulkanContext* GetVulkanContext() { return &m_ctx; }
     StagingManager* GetStagingManager() { return &m_stagingManager; }
     bool UsesDeviceLocalBuffers() const;
 
@@ -139,6 +168,10 @@ private:
     // 3D scene rendering
     SceneRenderer m_sceneRenderer;
     bool m_sceneRendererInitialized;
+
+    // Mesh rendering
+    MeshPipeline m_meshPipeline;
+    bool m_meshPipelineInitialized;
 };
 
 #endif // HEADLESSRENDERER_H

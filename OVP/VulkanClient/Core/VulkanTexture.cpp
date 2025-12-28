@@ -7,6 +7,7 @@
 
 #include "VulkanTexture.h"
 #include "StagingManager.h"
+#include "DDSLoader.h"
 
 // stb_image for file loading (implementation in a single compilation unit)
 #define STB_IMAGE_IMPLEMENTATION
@@ -87,7 +88,19 @@ bool VulkanTexture::CreateFromFile(VulkanContext* ctx, StagingManager* staging, 
         return false;
     }
 
-    // Load image using stb_image
+    // Check if it's a DDS file
+    if (DDSLoader::IsDDSFile(path)) {
+        DDSImage dds;
+        if (!DDSLoader::Load(path, dds)) {
+            return false;
+        }
+
+        // Create texture from DDS data
+        return CreateFromMemory(ctx, staging, dds.data.data(),
+                                dds.width, dds.height, dds.format);
+    }
+
+    // Load image using stb_image (PNG, JPG, BMP, etc.)
     int width, height, channels;
     stbi_uc* pixels = stbi_load(path, &width, &height, &channels, STBI_rgb_alpha);
     if (!pixels) {

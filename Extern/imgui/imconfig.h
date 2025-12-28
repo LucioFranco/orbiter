@@ -19,6 +19,22 @@
 //#define IM_ASSERT(_EXPR)  MyAssert(_EXPR)
 //#define IM_ASSERT(_EXPR)  ((void)(_EXPR))     // Disable asserts
 
+// Orbiter: Custom assertion that logs to stderr instead of showing popup dialogs
+// This helps with headless testing where popups would hang the process
+#include <cstdio>
+
+inline void ImGuiLogAssert(const char* expr, const char* file, int line) {
+    fprintf(stderr, "[ImGui ASSERT FAILED] %s at %s:%d\n", expr, file, line);
+    fflush(stderr);
+}
+
+#define IM_ASSERT(_EXPR) \
+    do { \
+        if (!(_EXPR)) { \
+            ImGuiLogAssert(#_EXPR, __FILE__, __LINE__); \
+        } \
+    } while (0)
+
 //---- Define attributes of all API symbols declarations, e.g. for DLL under Windows
 // Using Dear ImGui via a shared library is not recommended, because of function call overhead and because we don't guarantee backward nor forward ABI compatibility.
 // - Windows DLL users: heaps and globals are not shared across DLL boundaries! You will need to call SetCurrentContext() + SetAllocatorFunctions()

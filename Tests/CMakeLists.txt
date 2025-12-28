@@ -68,6 +68,16 @@ if(ORBITER_BUILD_VULKANCLIENT)
 		WORKING_DIRECTORY ${ORBITER_BINARY_ROOT_DIR}
 	)
 	set_tests_properties(Vulkan.Headless PROPERTIES TIMEOUT 120)
+
+	# HeadlessGraphicsClient integration test - runs Orbiter with headless graphics
+	# This tests the full Orbiter + HeadlessGraphicsClient integration
+	add_test(
+		NAME Orbiter.HeadlessGraphicsClient
+		COMMAND $<TARGET_FILE:Orbiter> "--scenariox=${CMAKE_SOURCE_DIR}/Scenarios/Tests/GeneralApiTest.scn" "--plugin=HeadlessGraphicsClient" "--maxframes=10"
+		WORKING_DIRECTORY ${ORBITER_BINARY_ROOT_DIR}
+	)
+	set_tests_properties(Orbiter.HeadlessGraphicsClient PROPERTIES TIMEOUT 60)
+	set_tests_properties(Orbiter.HeadlessGraphicsClient PROPERTIES DEPENDS HeadlessGraphicsClient)
 endif()
 
 if (BUILD_ORBITER_SERVER)
