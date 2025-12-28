@@ -1,0 +1,7 @@
+'vswhere.exe' is not recognized as an internal or external command,
+operable program or batch file.
+[1/5] Building CXX object OVP\VulkanClient\CMakeFiles\VulkanCore.dir\Mesh\SphereGenerator.cpp.obj
+[2/5] Linking CXX static library OVP\VulkanClient\VulkanCore.lib
+[3/5] Linking CXX shared module Modules\Plugin\VulkanClient.dll
+[4/5] Building CXX object Tests\CMakeFiles\Vulkan.Headless.dir\Vulkan.Headless.cpp.obj
+[5/5] Linking CXX executable Vulkan.Headless.exe

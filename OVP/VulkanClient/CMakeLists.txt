@@ -106,6 +106,8 @@ add_library(VulkanCore STATIC
     Core/MeshPipeline.h
     Mesh/VulkanMesh.cpp
     Mesh/VulkanMesh.h
+    Mesh/SphereGenerator.cpp
+    Mesh/SphereGenerator.h
     Resources/TextureManager.cpp
     Resources/TextureManager.h
 )

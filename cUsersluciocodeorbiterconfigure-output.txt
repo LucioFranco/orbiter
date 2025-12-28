@@ -1,0 +1,167 @@
+DXSDK_DIR set to: c:\Users\lucio\code\orbiter\DXSDK
+'vswhere.exe' is not recognized as an internal or external command,
+operable program or batch file.
+Linker path: C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50.35717\bin\HostX64\x64\link.exe
+-- The C compiler identification is MSVC 19.50.35721.0
+-- The CXX compiler identification is MSVC 19.50.35721.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Could NOT find LATEX (missing: LATEX_COMPILER) 
+-- Looking for MFC
+-- Looking for MFC - not found
+Parsing public/common/TracyVersion.hpp file
+VERSION 0.12.2
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - not found
+-- Found Threads: TRUE
+CMake Warning (dev) at out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:104 (option):
+  Policy CMP0077 is not set: option() honors normal variables.  Run "cmake
+  --help-policy CMP0077" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+  For compatibility with older versions of CMake, option is clearing the
+  normal variable 'TRACY_ENABLE'.
+Call Stack (most recent call first):
+  out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:113 (set_option)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- TRACY_ENABLE: ON
+CMake Warning (dev) at out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:104 (option):
+  Policy CMP0077 is not set: option() honors normal variables.  Run "cmake
+  --help-policy CMP0077" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+  For compatibility with older versions of CMake, option is clearing the
+  normal variable 'TRACY_ON_DEMAND'.
+Call Stack (most recent call first):
+  out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:114 (set_option)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- TRACY_ON_DEMAND: OFF
+-- TRACY_CALLSTACK: OFF
+-- TRACY_NO_CALLSTACK: OFF
+-- TRACY_NO_CALLSTACK_INLINES: OFF
+CMake Warning (dev) at out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:104 (option):
+  Policy CMP0077 is not set: option() honors normal variables.  Run "cmake
+  --help-policy CMP0077" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+  For compatibility with older versions of CMake, option is clearing the
+  normal variable 'TRACY_ONLY_LOCALHOST'.
+Call Stack (most recent call first):
+  out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:118 (set_option)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- TRACY_ONLY_LOCALHOST: OFF
+-- TRACY_NO_BROADCAST: OFF
+CMake Warning (dev) at out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:104 (option):
+  Policy CMP0077 is not set: option() honors normal variables.  Run "cmake
+  --help-policy CMP0077" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+  For compatibility with older versions of CMake, option is clearing the
+  normal variable 'TRACY_ONLY_IPV4'.
+Call Stack (most recent call first):
+  out/build/windows-x64-debug/_deps/tracy-src/CMakeLists.txt:120 (set_option)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- TRACY_ONLY_IPV4: OFF
+-- TRACY_NO_CODE_TRANSFER: OFF
+-- TRACY_NO_CONTEXT_SWITCH: OFF
+-- TRACY_NO_EXIT: OFF
+-- TRACY_NO_SAMPLING: OFF
+-- TRACY_NO_VERIFY: OFF
+-- TRACY_NO_VSYNC_CAPTURE: OFF
+-- TRACY_NO_FRAME_IMAGE: OFF
+-- TRACY_NO_SYSTEM_TRACING: OFF
+-- TRACY_PATCHABLE_NOPSLEDS: OFF
+-- TRACY_DELAYED_INIT: OFF
+-- TRACY_MANUAL_LIFETIME: OFF
+-- TRACY_FIBERS: OFF
+-- TRACY_NO_CRASH_HANDLER: OFF
+-- TRACY_TIMER_FALLBACK: OFF
+-- TRACY_LIBUNWIND_BACKTRACE: OFF
+-- TRACY_SYMBOL_OFFLINE_RESOLVE: OFF
+-- TRACY_LIBBACKTRACE_ELF_DYNLOAD_SUPPORT: OFF
+-- TRACY_DEBUGINFOD: OFF
+-- TRACY_VERBOSE: OFF
+-- TRACY_DEMANGLE: OFF
+CMake Deprecation Warning at out/build/windows-x64-debug/_deps/zlib-src/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Looking for sys/types.h
+-- Looking for sys/types.h - found
+-- Looking for stdint.h
+-- Looking for stdint.h - found
+-- Looking for stddef.h
+-- Looking for stddef.h - found
+-- Check size of off64_t
+-- Check size of off64_t - failed
+-- Looking for fseeko
+-- Looking for fseeko - not found
+-- Looking for unistd.h
+-- Looking for unistd.h - not found
+-- Renaming
+--     C:/Users/lucio/code/orbiter/out/build/windows-x64-debug/_deps/zlib-src/zconf.h
+-- to 'zconf.h.included' because this file is included with zlib
+-- but CMake generates it automatically in the build directory.
+CMake Warning at Utils/Date/CMakeLists.txt:32 (message):
+  MFC not found: not building Date utility
+
+
+CMake Warning at Utils/Shipedit/CMakeLists.txt:38 (message):
+  MFC not found: not building Shipedit utility
+
+
+-- Found Vulkan: C:/VulkanSDK/1.4.328.1/Lib/vulkan-1.lib (found version "1.4.328") found components: glslc glslangValidator
+CMake Deprecation Warning at out/build/windows-x64-debug/_deps/glm-src/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+CMake Deprecation Warning at out/build/windows-x64-debug/_deps/glm-src/CMakeLists.txt:2 (cmake_policy):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- GLM: Version 1.0.1
+-- GLM: Build with C++ features auto detection
+Found existing irrKlang at C:/Users/lucio/code/orbiter/Extern/irrKlang/x64
+CMake Deprecation Warning at out/build/windows-x64-debug/_deps/catch2-src/CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Configuring done (33.0s)
+-- Generating done (0.5s)
+-- Build files have been written to: C:/Users/lucio/code/orbiter/out/build/windows-x64-debug

@@ -59,6 +59,7 @@ VulkanClient::VulkanClient(HINSTANCE hInstance)
     , m_firstUpdate(true)
     , m_sceneRendererInitialized(false)
     , m_meshPipelineInitialized(false)
+    , m_sphereMeshesInitialized(false)
 {
     for (uint32_t i = 0; i < VulkanSwapchain::MAX_FRAMES_IN_FLIGHT; i++) {
         m_commandBuffers[i] = VK_NULL_HANDLE;
@@ -79,6 +80,16 @@ VulkanClient::~VulkanClient()
     // Clear vessel visuals (will clean up VulkanMeshes)
     m_vesselVisuals.clear();
     m_objToVisual.clear();
+
+    // Clear planet visuals and sphere meshes
+    m_planets.clear();
+    for (int i = 0; i < SPHERE_LOD_COUNT; i++) {
+        if (m_sphereLOD[i]) {
+            m_sphereLOD[i]->Shutdown();
+            m_sphereLOD[i].reset();
+        }
+    }
+    m_sphereMeshesInitialized = false;
 
     // Clear surfaces/textures
     m_surfaces.clear();
@@ -299,6 +310,11 @@ void VulkanClient::clbkUpdate(bool running)
     if (m_firstUpdate && m_meshPipelineInitialized) {
         m_firstUpdate = false;
 
+        // Initialize sphere meshes for planet rendering
+        if (!m_sphereMeshesInitialized) {
+            InitSphereMeshes();
+        }
+
         DWORD nobj = oapiGetObjectCount();
         char buf[256];
         sprintf_s(buf, "VulkanClient: First update - scanning %lu objects", nobj);
@@ -308,11 +324,22 @@ void VulkanClient::clbkUpdate(bool running)
             OBJHANDLE hObj = oapiGetObjectByIndex(i);
             if (!hObj) continue;
 
-            // Only create visuals for vessels (for now)
-            if (oapiGetObjectType(hObj) == OBJTP_VESSEL) {
+            int objType = oapiGetObjectType(hObj);
+
+            // Create visuals for vessels
+            if (objType == OBJTP_VESSEL) {
                 clbkNewVessel(hObj);
             }
+            // Create visuals for planets and stars
+            else if (objType == OBJTP_PLANET || objType == OBJTP_STAR) {
+                CreatePlanetVisual(hObj);
+            }
         }
+    }
+
+    // Update planet visibility every frame
+    if (m_sphereMeshesInitialized && !m_planets.empty()) {
+        UpdatePlanetVisibility();
     }
 }
 
@@ -542,6 +569,124 @@ void VulkanClient::clbkRenderScene()
         // Bind mesh pipeline
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_meshPipeline.GetPipeline());
 
+        // ================================================================
+        // Render planets (farthest first, before vessels)
+        // ================================================================
+        if (m_sphereMeshesInitialized && !m_planets.empty()) {
+            // Get sun position for lighting
+            OBJHANDLE hSun = oapiGetGbodyByIndex(0);  // Sun is usually index 0
+            VECTOR3 sunPos;
+            if (hSun) {
+                oapiGetGlobalPos(hSun, &sunPos);
+            } else {
+                sunPos = { 0, 0, 0 };
+            }
+
+            // Planets are already sorted by distance (farthest first) in UpdatePlanetVisibility
+            for (auto& pv : m_planets) {
+                if (!pv->active || pv->lodLevel < 0) continue;
+
+                // Get sphere mesh for this LOD level
+                VulkanMesh* sphereMesh = m_sphereLOD[pv->lodLevel].get();
+                if (!sphereMesh || !sphereMesh->IsUploaded()) continue;
+
+                // Get planet position relative to camera
+                VECTOR3 planetPos;
+                oapiGetGlobalPos(pv->hObj, &planetPos);
+                VECTOR3 relPos = {
+                    planetPos.x - camPos.x,
+                    planetPos.y - camPos.y,
+                    planetPos.z - camPos.z
+                };
+
+                // Get planet rotation
+                MATRIX3 planetRot;
+                oapiGetRotationMatrix(pv->hObj, &planetRot);
+
+                // Build model matrix with scale (planet radius)
+                // Model = Translation * Rotation * Scale
+                float scale = static_cast<float>(pv->radius);
+                float planetModel[16] = {
+                    (float)planetRot.m11 * scale, (float)planetRot.m12 * scale, (float)planetRot.m13 * scale, 0.0f,
+                    (float)planetRot.m21 * scale, (float)planetRot.m22 * scale, (float)planetRot.m23 * scale, 0.0f,
+                    (float)planetRot.m31 * scale, (float)planetRot.m32 * scale, (float)planetRot.m33 * scale, 0.0f,
+                    (float)relPos.x, (float)relPos.y, (float)relPos.z, 1.0f
+                };
+
+                // Compute MVP = Proj * View * Model
+                float planetMv[16];
+                for (int col = 0; col < 4; col++) {
+                    for (int row = 0; row < 4; row++) {
+                        planetMv[col*4+row] = 0;
+                        for (int k = 0; k < 4; k++) {
+                            planetMv[col*4+row] += view[k*4+row] * planetModel[col*4+k];
+                        }
+                    }
+                }
+
+                float planetMvp[16];
+                for (int col = 0; col < 4; col++) {
+                    for (int row = 0; row < 4; row++) {
+                        planetMvp[col*4+row] = 0;
+                        for (int k = 0; k < 4; k++) {
+                            planetMvp[col*4+row] += proj[k*4+row] * planetMv[col*4+k];
+                        }
+                    }
+                }
+
+                // Calculate light direction (sun relative to planet, normalized)
+                float planetLightDir[4] = {
+                    (float)(sunPos.x - planetPos.x),
+                    (float)(sunPos.y - planetPos.y),
+                    (float)(sunPos.z - planetPos.z),
+                    0.0f
+                };
+                float lightLen = sqrtf(planetLightDir[0]*planetLightDir[0] +
+                                       planetLightDir[1]*planetLightDir[1] +
+                                       planetLightDir[2]*planetLightDir[2]);
+                if (lightLen > 0.0f) {
+                    planetLightDir[0] /= lightLen;
+                    planetLightDir[1] /= lightLen;
+                    planetLightDir[2] /= lightLen;
+                }
+
+                // Bind vertex/index buffers
+                VkBuffer vertexBuffers[] = { sphereMesh->GetVertexBuffer() };
+                VkDeviceSize offsets[] = { 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+                vkCmdBindIndexBuffer(cmd, sphereMesh->GetIndexBuffer(), 0, VK_INDEX_TYPE_UINT16);
+
+                // Get mesh group (sphere has only one group)
+                const MeshGroup* grp = sphereMesh->GetGroup(0);
+                if (!grp) continue;
+
+                // Planet material (full diffuse, slight ambient)
+                float matDiffuse[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+                float matEmissive[4] = { 0.1f, 0.1f, 0.1f, 0.0f };  // Slight ambient
+
+                // Set up push constants
+                MeshPushConstants pc;
+                memcpy(pc.mvp, planetMvp, sizeof(float) * 16);
+                memcpy(pc.model, planetModel, sizeof(float) * 16);
+                memcpy(pc.lightDir, planetLightDir, sizeof(float) * 4);
+                memcpy(pc.matDiffuse, matDiffuse, sizeof(float) * 4);
+                memcpy(pc.matEmissive, matEmissive, sizeof(float) * 4);
+                pc.matEmissive[3] = (pv->texDescriptor != m_meshPipeline.GetDefaultTextureDescriptor()) ? 1.0f : 0.0f;
+
+                vkCmdPushConstants(cmd, m_meshPipeline.GetLayout(),
+                                  VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                  0, sizeof(MeshPushConstants), &pc);
+
+                // Bind texture descriptor
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                       m_meshPipeline.GetLayout(), 0, 1, &pv->texDescriptor, 0, nullptr);
+
+                // Draw the sphere
+                vkCmdDrawIndexed(cmd, grp->indexCount, 1, grp->indexOffset, grp->vertexOffset, 0);
+            }
+        }
+
+        // ================================================================
         // Render each vessel
         for (auto& kv : m_vesselVisuals) {
             VesselVisual* vv = kv.second.get();
@@ -1446,4 +1591,152 @@ VulkanTexture* VulkanClient::GetTextureFromSurface(SURFHANDLE surf) const
     }
 
     return it->second->texture.get();
+}
+
+// ======================================================================
+// Planet rendering
+// ======================================================================
+
+void VulkanClient::InitSphereMeshes()
+{
+    if (m_sphereMeshesInitialized) {
+        return;
+    }
+
+    oapiWriteLog(const_cast<char*>("VulkanClient: Initializing sphere meshes for planet rendering"));
+
+    // Pre-generate 4 LOD levels (shared by all planets)
+    // Matches D3D9Client's sphere templates from CSphereMgr.cpp
+    const int rings[SPHERE_LOD_COUNT] = {6, 8, 12, 16};
+    const int sectors[SPHERE_LOD_COUNT] = {12, 16, 24, 32};
+
+    for (int i = 0; i < SPHERE_LOD_COUNT; i++) {
+        auto geom = GenerateSphere(rings[i], sectors[i]);
+
+        m_sphereLOD[i] = std::make_unique<VulkanMesh>();
+        if (!m_sphereLOD[i]->Init(&m_ctx, &m_stagingManager)) {
+            char buf[256];
+            sprintf_s(buf, "VulkanClient: Failed to init sphere LOD %d", i);
+            oapiWriteLog(buf);
+            continue;
+        }
+
+        m_sphereLOD[i]->AddGroup(
+            geom.vertices.data(), static_cast<uint32_t>(geom.vertices.size()),
+            geom.indices.data(), static_cast<uint32_t>(geom.indices.size()),
+            0, 0, 0, 0, 0
+        );
+
+        if (!m_sphereLOD[i]->Upload()) {
+            char buf[256];
+            sprintf_s(buf, "VulkanClient: Failed to upload sphere LOD %d", i);
+            oapiWriteLog(buf);
+        } else {
+            char buf[256];
+            sprintf_s(buf, "VulkanClient: Sphere LOD %d: %d rings, %u verts, %u indices",
+                i, rings[i], static_cast<uint32_t>(geom.vertices.size()), static_cast<uint32_t>(geom.indices.size()));
+            oapiWriteLog(buf);
+        }
+    }
+
+    m_sphereMeshesInitialized = true;
+}
+
+void VulkanClient::CreatePlanetVisual(OBJHANDLE hObj)
+{
+    if (!hObj) return;
+
+    // Check if we already have a visual for this object
+    for (const auto& pv : m_planets) {
+        if (pv->hObj == hObj) {
+            return;  // Already exists
+        }
+    }
+
+    auto pv = std::make_unique<PlanetVisual>();
+    pv->hObj = hObj;
+    oapiGetObjectName(hObj, pv->name, sizeof(pv->name));
+    pv->radius = oapiGetSize(hObj);
+    pv->lodLevel = 0;
+    pv->active = false;
+    pv->hTexture = nullptr;
+    pv->texDescriptor = VK_NULL_HANDLE;
+
+    // Try to load planet texture: Textures/<Planet>/<Planet>.dds
+    char texPath[256];
+    PlanetTexturePath(pv->name, texPath);
+    size_t len = strlen(texPath);
+    if (len > 0 && texPath[len - 1] != '\\' && texPath[len - 1] != '/') {
+        strcat_s(texPath, "\\");
+    }
+    strcat_s(texPath, pv->name);
+    strcat_s(texPath, ".dds");
+
+    pv->hTexture = clbkLoadTexture(texPath, 0x8);  // 0x8 = store in repository
+    if (pv->hTexture) {
+        pv->texDescriptor = m_texManager.GetTextureDescriptor(pv->hTexture);
+        char buf[256];
+        sprintf_s(buf, "VulkanClient: Loaded planet texture '%s'", texPath);
+        oapiWriteLog(buf);
+    } else {
+        // Fallback to default texture
+        pv->texDescriptor = m_meshPipeline.GetDefaultTextureDescriptor();
+        char buf[256];
+        sprintf_s(buf, "VulkanClient: No texture found for planet '%s', using default", pv->name);
+        oapiWriteLog(buf);
+    }
+
+    char buf[256];
+    sprintf_s(buf, "VulkanClient: Created planet visual for '%s' (radius=%.0f km)",
+        pv->name, pv->radius / 1000.0);
+    oapiWriteLog(buf);
+
+    m_planets.push_back(std::move(pv));
+}
+
+void VulkanClient::UpdatePlanetVisibility()
+{
+    // Get camera position and aperture
+    VECTOR3 camPos;
+    oapiCameraGlobalPos(&camPos);
+    double aperture = oapiCameraAperture();
+    double tanAp = tan(aperture);
+
+    for (auto& pv : m_planets) {
+        VECTOR3 planetPos;
+        oapiGetGlobalPos(pv->hObj, &planetPos);
+
+        // Calculate distance from camera to planet center
+        double dx = planetPos.x - camPos.x;
+        double dy = planetPos.y - camPos.y;
+        double dz = planetPos.z - camPos.z;
+        pv->camDist = sqrt(dx * dx + dy * dy + dz * dz);
+
+        // Calculate apparent radius in pixels (D3D9Client formula from VPlanet.cpp:868-869)
+        double alt = std::max(1.0, pv->camDist - pv->radius);
+        pv->apprad = pv->radius * static_cast<double>(m_viewportHeight) * 0.5 / (alt * tanAp);
+
+        // Visibility hysteresis (prevents flicker at boundaries)
+        if (pv->apprad < 1.0) {
+            pv->active = false;
+        } else if (pv->apprad > 2.0) {
+            pv->active = true;
+        }
+        // Between 1.0 and 2.0, keep previous state
+
+        // LOD selection (D3D9Client formula from VPlanet.cpp:875-885)
+        if (pv->apprad < 2.5) {
+            pv->lodLevel = -1;  // Render as dot (not implemented yet)
+        } else {
+            double circumference = 3.14159265358979323846 * 2.0 * pv->apprad;
+            int level = static_cast<int>(log2(circumference) - 6.0);
+            pv->lodLevel = std::clamp(level, 0, SPHERE_LOD_COUNT - 1);
+        }
+    }
+
+    // Sort by distance (farthest first) for correct render order
+    std::sort(m_planets.begin(), m_planets.end(),
+        [](const std::unique_ptr<PlanetVisual>& a, const std::unique_ptr<PlanetVisual>& b) {
+            return a->camDist > b->camDist;
+        });
 }

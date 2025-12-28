@@ -12,6 +12,7 @@
 #include "../OVP/VulkanClient/Core/VulkanContext.h"
 #include "../OVP/VulkanClient/Core/VulkanTexture.h"
 #include "../OVP/VulkanClient/Core/VulkanDescriptors.h"
+#include "../OVP/VulkanClient/Mesh/SphereGenerator.h"
 #include <imgui.h>
 #include <cmath>
 #include <algorithm>
@@ -2081,5 +2082,134 @@ TEST_CASE("Texture UV coordinate interpolation", "[Vulkan][Headless][MeshRenderi
 
     mesh.Shutdown();
     renderer.Shutdown();
+}
+
+// ======================================================================
+// SphereGenerator tests
+// ======================================================================
+
+TEST_CASE("SphereGenerator basic geometry", "[Vulkan][SphereGenerator]")
+{
+    SECTION("Level 1: 6 rings, 12 sectors") {
+        auto geom = GenerateSphere(6, 12);
+
+        // Check reasonable vertex count
+        // Formula: (rings + 1) * (sectors * 2 + 1) vertices
+        uint32_t expectedVerts = (6 + 1) * (12 * 2 + 1);
+        REQUIRE(geom.vertices.size() == expectedVerts);
+
+        // Check reasonable index count
+        // Formula: rings * sectors * 2 * 6 indices (2 triangles per quad, 3 indices per tri)
+        uint32_t expectedIndices = 6 * 12 * 2 * 6;
+        REQUIRE(geom.indices.size() == expectedIndices);
+
+        INFO("Sphere LOD 1: " << geom.vertices.size() << " vertices, "
+             << geom.indices.size() << " indices, "
+             << geom.indices.size() / 3 << " triangles");
+    }
+
+    SECTION("Level 4: 16 rings, 32 sectors") {
+        auto geom = GenerateSphere(16, 32);
+
+        uint32_t expectedVerts = (16 + 1) * (32 * 2 + 1);
+        REQUIRE(geom.vertices.size() == expectedVerts);
+
+        uint32_t expectedIndices = 16 * 32 * 2 * 6;
+        REQUIRE(geom.indices.size() == expectedIndices);
+
+        INFO("Sphere LOD 4: " << geom.vertices.size() << " vertices, "
+             << geom.indices.size() << " indices, "
+             << geom.indices.size() / 3 << " triangles");
+    }
+}
+
+TEST_CASE("SphereGenerator vertex positions", "[Vulkan][SphereGenerator]")
+{
+    auto geom = GenerateSphere(8, 16);
+
+    SECTION("Vertices on unit sphere") {
+        for (size_t i = 0; i < geom.vertices.size(); i++) {
+            const auto& v = geom.vertices[i];
+            float dist = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+            INFO("Vertex " << i << " distance from origin: " << dist);
+            REQUIRE(std::abs(dist - 1.0f) < 0.001f);
+        }
+    }
+
+    SECTION("North pole at y=1") {
+        const auto& v = geom.vertices[0];
+        REQUIRE(std::abs(v.y - 1.0f) < 0.001f);
+        REQUIRE(std::abs(v.x) < 0.001f);
+        REQUIRE(std::abs(v.z) < 0.001f);
+    }
+
+    SECTION("South pole at y=-1") {
+        // South pole is at the last row
+        uint32_t vertsPerRow = 16 * 2 + 1;
+        uint32_t lastRowStart = 8 * vertsPerRow;
+        const auto& v = geom.vertices[lastRowStart];
+        REQUIRE(std::abs(v.y + 1.0f) < 0.001f);  // y = -1
+    }
+}
+
+TEST_CASE("SphereGenerator normals", "[Vulkan][SphereGenerator]")
+{
+    auto geom = GenerateSphere(8, 16);
+
+    for (size_t i = 0; i < geom.vertices.size(); i++) {
+        const auto& v = geom.vertices[i];
+
+        // Normal should equal position for unit sphere
+        REQUIRE(std::abs(v.nx - v.x) < 0.001f);
+        REQUIRE(std::abs(v.ny - v.y) < 0.001f);
+        REQUIRE(std::abs(v.nz - v.z) < 0.001f);
+
+        // Normal should be unit length
+        float len = std::sqrt(v.nx * v.nx + v.ny * v.ny + v.nz * v.nz);
+        REQUIRE(std::abs(len - 1.0f) < 0.001f);
+    }
+}
+
+TEST_CASE("SphereGenerator UV coordinates", "[Vulkan][SphereGenerator]")
+{
+    auto geom = GenerateSphere(8, 16);
+
+    for (size_t i = 0; i < geom.vertices.size(); i++) {
+        const auto& v = geom.vertices[i];
+
+        INFO("Vertex " << i << " UV: (" << v.tu << ", " << v.tv << ")");
+
+        // U should be in [0, 1] (with small tolerance for floating point)
+        REQUIRE(v.tu >= -0.001f);
+        REQUIRE(v.tu <= 1.001f);
+
+        // V should be in [0, 1]
+        REQUIRE(v.tv >= 0.0f);
+        REQUIRE(v.tv <= 1.0f);
+    }
+
+    SECTION("North pole V=0") {
+        const auto& v = geom.vertices[0];
+        REQUIRE(std::abs(v.tv) < 0.001f);
+    }
+
+    SECTION("South pole V=1") {
+        uint32_t vertsPerRow = 16 * 2 + 1;
+        uint32_t lastRowStart = 8 * vertsPerRow;
+        const auto& v = geom.vertices[lastRowStart];
+        REQUIRE(std::abs(v.tv - 1.0f) < 0.001f);
+    }
+}
+
+TEST_CASE("SphereGenerator index validity", "[Vulkan][SphereGenerator]")
+{
+    auto geom = GenerateSphere(8, 16);
+
+    uint32_t maxIndex = static_cast<uint32_t>(geom.vertices.size() - 1);
+
+    for (size_t i = 0; i < geom.indices.size(); i++) {
+        INFO("Index " << i << " = " << geom.indices[i]);
+        REQUIRE(geom.indices[i] <= maxIndex);
+    }
 }
 

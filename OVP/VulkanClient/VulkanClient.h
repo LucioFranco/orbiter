@@ -16,11 +16,13 @@
 #include "Core/MeshPipeline.h"
 #include "Core/VulkanTexture.h"
 #include "Mesh/VulkanMesh.h"
+#include "Mesh/SphereGenerator.h"
 #include "Resources/TextureManager.h"
 #include <vector>
 #include <map>
 #include <memory>
 #include <string>
+#include <algorithm>
 
 // Forward declare ImGui types
 struct ImGui_ImplVulkan_InitInfo;
@@ -121,8 +123,32 @@ private:
         std::vector<MeshTransform> meshTransforms;  // Per-mesh offset transforms
     };
 
+    // Planet visual tracking (following D3D9Client pattern)
+    struct PlanetVisual {
+        OBJHANDLE hObj;
+        char name[64];
+        double radius;                      // From oapiGetSize()
+        double apprad;                      // Apparent radius in pixels
+        double camDist;                     // Distance from camera
+        int lodLevel;                       // -1=dot, 0-3=sphere LOD
+        SURFHANDLE hTexture;                // Surface texture
+        VkDescriptorSet texDescriptor;      // Cached descriptor
+        bool active;                        // Visible enough to render
+
+        PlanetVisual() : hObj(nullptr), radius(0), apprad(0), camDist(0),
+                         lodLevel(0), hTexture(nullptr), texDescriptor(VK_NULL_HANDLE),
+                         active(false) {
+            name[0] = '\0';
+        }
+    };
+
     // Rendering helpers
     void RecordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
+
+    // Planet rendering helpers
+    void InitSphereMeshes();
+    void CreatePlanetVisual(OBJHANDLE hObj);
+    void UpdatePlanetVisibility();
 
     // Shared Vulkan context
     VulkanContext m_ctx;
@@ -170,6 +196,12 @@ private:
     // Vessel visual tracking
     std::map<VISHANDLE, std::unique_ptr<VesselVisual>> m_vesselVisuals;
     std::map<OBJHANDLE, VISHANDLE> m_objToVisual;  // Maps vessel to its visual handle
+
+    // Planet visual tracking
+    static constexpr int SPHERE_LOD_COUNT = 4;
+    std::unique_ptr<VulkanMesh> m_sphereLOD[SPHERE_LOD_COUNT];  // Shared sphere meshes
+    std::vector<std::unique_ptr<PlanetVisual>> m_planets;
+    bool m_sphereMeshesInitialized;
 
     // Loaded surfaces/textures keyed by their pointer (acts as SURFHANDLE)
     std::map<SURFHANDLE, std::unique_ptr<SurfaceHandle>> m_surfaces;
