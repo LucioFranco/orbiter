@@ -110,6 +110,14 @@ add_library(VulkanCore STATIC
     Mesh/SphereGenerator.h
     Resources/TextureManager.cpp
     Resources/TextureManager.h
+    Tile/TileCoord.h
+    Tile/PatchMeshGenerator.h
+    Tile/TileTextureLoader.cpp
+    Tile/TileTextureLoader.h
+    Tile/TileRenderer.cpp
+    Tile/TileRenderer.h
+    Tile/TreeArchive.cpp
+    Tile/TreeArchive.h
 )
 
 target_include_directories(VulkanCore PUBLIC
@@ -122,6 +130,7 @@ target_include_directories(VulkanCore PUBLIC
 target_link_libraries(VulkanCore PUBLIC
     Vulkan::Vulkan
     glm::glm
+    zlib
 )
 
 # VMA is header-only, included via VulkanMemory.h

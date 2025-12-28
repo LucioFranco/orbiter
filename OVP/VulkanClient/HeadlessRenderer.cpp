@@ -426,6 +426,44 @@ void HeadlessRenderer::Clear(float r, float g, float b, float a)
     m_clearColor[3] = a;
 }
 
+void HeadlessRenderer::BeginRenderPass()
+{
+    if (m_renderPassStarted) {
+        return;  // Already started
+    }
+
+    std::array<VkClearValue, 2> clearValues{};
+    clearValues[0].color = {{ m_clearColor[0], m_clearColor[1], m_clearColor[2], m_clearColor[3] }};
+    clearValues[1].depthStencil = { 1.0f, 0 };
+
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass = m_renderPass;
+    rpBegin.framebuffer = m_framebuffer;
+    rpBegin.renderArea.offset = { 0, 0 };
+    rpBegin.renderArea.extent = { m_width, m_height };
+    rpBegin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+    rpBegin.pClearValues = clearValues.data();
+
+    vkCmdBeginRenderPass(m_commandBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+    m_renderPassStarted = true;
+
+    // Set viewport and scissor
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(m_width);
+    viewport.height = static_cast<float>(m_height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = { m_width, m_height };
+    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+}
+
 void HeadlessRenderer::RenderScene()
 {
     if (!m_sceneRendererInitialized) {

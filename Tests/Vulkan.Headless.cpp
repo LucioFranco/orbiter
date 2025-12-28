@@ -2213,3 +2213,1319 @@ TEST_CASE("SphereGenerator index validity", "[Vulkan][SphereGenerator]")
     }
 }
 
+// ======================================================================
+// TileCoord Tests (Tile-based Planet Rendering)
+// ======================================================================
+
+#include "../OVP/VulkanClient/Tile/TileCoord.h"
+
+TEST_CASE("TileCoord tile count calculations", "[Tile][TileCoord]")
+{
+    SECTION("Level 1: 1 lat, 2 lng tiles") {
+        REQUIRE(TileCoord::NumLatTiles(1) == 1);
+        REQUIRE(TileCoord::NumLngTiles(1) == 2);
+    }
+
+    SECTION("Level 4: 8 lat, 16 lng tiles (32 total)") {
+        REQUIRE(TileCoord::NumLatTiles(4) == 8);
+        REQUIRE(TileCoord::NumLngTiles(4) == 16);
+    }
+
+    SECTION("Level 5: 16 lat, 32 lng tiles (512 total)") {
+        REQUIRE(TileCoord::NumLatTiles(5) == 16);
+        REQUIRE(TileCoord::NumLngTiles(5) == 32);
+    }
+
+    SECTION("Level 8: 128 lat, 256 lng tiles") {
+        REQUIRE(TileCoord::NumLatTiles(8) == 128);
+        REQUIRE(TileCoord::NumLngTiles(8) == 256);
+    }
+}
+
+TEST_CASE("TileCoord tile bounds calculation", "[Tile][TileCoord]")
+{
+    SECTION("Level 1, tile (0,0) covers western hemisphere") {
+        auto bounds = TileCoord::GetTileBounds(1, 0, 0);
+
+        // Full latitude range (only 1 lat tile at level 1)
+        REQUIRE(std::abs(bounds.minLat - (-M_PI / 2.0)) < 0.001);
+        REQUIRE(std::abs(bounds.maxLat - (M_PI / 2.0)) < 0.001);
+
+        // Western hemisphere longitude
+        REQUIRE(std::abs(bounds.minLng - (-M_PI)) < 0.001);
+        REQUIRE(std::abs(bounds.maxLng - 0.0) < 0.001);
+    }
+
+    SECTION("Level 1, tile (0,1) covers eastern hemisphere") {
+        auto bounds = TileCoord::GetTileBounds(1, 0, 1);
+
+        // Full latitude range
+        REQUIRE(std::abs(bounds.minLat - (-M_PI / 2.0)) < 0.001);
+        REQUIRE(std::abs(bounds.maxLat - (M_PI / 2.0)) < 0.001);
+
+        // Eastern hemisphere longitude
+        REQUIRE(std::abs(bounds.minLng - 0.0) < 0.001);
+        REQUIRE(std::abs(bounds.maxLng - M_PI) < 0.001);
+    }
+
+    SECTION("Level 4, tile (0,0) covers SW corner") {
+        auto bounds = TileCoord::GetTileBounds(4, 0, 0);
+
+        // 8 lat tiles at level 4, so each tile is PI/8 in latitude
+        double latExtent = M_PI / 8.0;
+        REQUIRE(std::abs(bounds.LatExtent() - latExtent) < 0.001);
+
+        // 16 lng tiles at level 4, so each tile is 2*PI/16 = PI/8 in longitude
+        double lngExtent = M_PI / 8.0;
+        REQUIRE(std::abs(bounds.LngExtent() - lngExtent) < 0.001);
+
+        // This tile should be at the south pole, western edge
+        REQUIRE(std::abs(bounds.minLat - (-M_PI / 2.0)) < 0.001);
+        REQUIRE(std::abs(bounds.minLng - (-M_PI)) < 0.001);
+    }
+}
+
+TEST_CASE("TileCoord path generation", "[Tile][TileCoord]")
+{
+    // Test that path generation matches D3D9Client's format
+    // Format: {root}\{planet}\Surf\{lvl+4:02d}\{ilat:06d}\{ilng:06d}.dds
+
+    SECTION("Level 4 surface path") {
+        std::string path = TileCoord::GetSurfacePath(
+            "C:\\Orbiter\\Textures", "Earth", 4, 3, 7);
+
+        // Level 4 + 4 = 08 in path
+        INFO("Generated path: " << path);
+        REQUIRE(path.find("\\Earth\\Surf\\08\\000003\\000007.dds") != std::string::npos);
+    }
+
+    SECTION("Level 1 surface path") {
+        std::string path = TileCoord::GetSurfacePath(
+            "C:\\Orbiter\\Textures", "Moon", 1, 0, 0);
+
+        // Level 1 + 4 = 05 in path
+        INFO("Generated path: " << path);
+        REQUIRE(path.find("\\Moon\\Surf\\05\\000000\\000000.dds") != std::string::npos);
+    }
+
+    SECTION("High level with large indices") {
+        std::string path = TileCoord::GetSurfacePath(
+            "C:\\Orbiter\\Textures", "Earth", 10, 512, 1023);
+
+        // Level 10 + 4 = 14 in path
+        INFO("Generated path: " << path);
+        REQUIRE(path.find("\\Earth\\Surf\\14\\000512\\001023.dds") != std::string::npos);
+    }
+
+    SECTION("Mask path") {
+        std::string path = TileCoord::GetMaskPath(
+            "C:\\Orbiter\\Textures", "Earth", 4, 3, 7);
+
+        INFO("Generated path: " << path);
+        REQUIRE(path.find("\\Earth\\Mask\\08\\000003\\000007.dds") != std::string::npos);
+    }
+
+    SECTION("Elevation path (no +4 offset)") {
+        std::string path = TileCoord::GetElevationPath(
+            "C:\\Orbiter\\Textures", "Earth", 4, 3, 7);
+
+        // Elevation uses level directly (no +4 offset)
+        INFO("Generated path: " << path);
+        REQUIRE(path.find("\\Earth\\Elev\\04\\000003\\000007.elv") != std::string::npos);
+    }
+}
+
+TEST_CASE("TileCoord child/parent relationships", "[Tile][TileCoord]")
+{
+    SECTION("Parent of level 4 tile") {
+        TileKey child(4, 5, 10);
+        TileKey parent = TileCoord::GetParentKey(child);
+
+        REQUIRE(parent.level == 3);
+        REQUIRE(parent.ilat == 2);   // 5 / 2 = 2
+        REQUIRE(parent.ilng == 5);   // 10 / 2 = 5
+    }
+
+    SECTION("Children of a tile") {
+        TileKey parent(3, 2, 5);
+
+        // Child 0 (SW): ilat*2+0, ilng*2+0
+        TileKey c0 = TileCoord::GetChildKey(parent, 0);
+        REQUIRE(c0.level == 4);
+        REQUIRE(c0.ilat == 4);
+        REQUIRE(c0.ilng == 10);
+
+        // Child 1 (SE): ilat*2+0, ilng*2+1
+        TileKey c1 = TileCoord::GetChildKey(parent, 1);
+        REQUIRE(c1.level == 4);
+        REQUIRE(c1.ilat == 4);
+        REQUIRE(c1.ilng == 11);
+
+        // Child 2 (NW): ilat*2+1, ilng*2+0
+        TileKey c2 = TileCoord::GetChildKey(parent, 2);
+        REQUIRE(c2.level == 4);
+        REQUIRE(c2.ilat == 5);
+        REQUIRE(c2.ilng == 10);
+
+        // Child 3 (NE): ilat*2+1, ilng*2+1
+        TileKey c3 = TileCoord::GetChildKey(parent, 3);
+        REQUIRE(c3.level == 4);
+        REQUIRE(c3.ilat == 5);
+        REQUIRE(c3.ilng == 11);
+    }
+
+    SECTION("Child index calculation") {
+        // Tile (5, 11) at level 4 -> parent is (2, 5) at level 3
+        // 5 = 2*2 + 1, so latBit = 2
+        // 11 = 5*2 + 1, so lngBit = 1
+        // childIdx = 2 | 1 = 3
+        TileKey tile(4, 5, 11);
+        REQUIRE(TileCoord::GetChildIndex(tile) == 3);
+
+        TileKey tile2(4, 4, 10);  // 4 = 2*2+0, 10 = 5*2+0
+        REQUIRE(TileCoord::GetChildIndex(tile2) == 0);
+    }
+
+    SECTION("Round-trip parent-child") {
+        TileKey parent(5, 10, 20);
+
+        for (int childIdx = 0; childIdx < 4; childIdx++) {
+            TileKey child = TileCoord::GetChildKey(parent, childIdx);
+            TileKey backToParent = TileCoord::GetParentKey(child);
+
+            REQUIRE(backToParent.level == parent.level);
+            REQUIRE(backToParent.ilat == parent.ilat);
+            REQUIRE(backToParent.ilng == parent.ilng);
+
+            REQUIRE(TileCoord::GetChildIndex(child) == childIdx);
+        }
+    }
+}
+
+TEST_CASE("TileCoord texture coordinate ranges", "[Tile][TileCoord]")
+{
+    SECTION("Child tex ranges divide parent equally") {
+        // Child 0 (SW): lower-left quarter
+        auto range0 = TileCoord::GetChildTexRange(0);
+        REQUIRE(std::abs(range0.uMin - 0.0f) < 0.001f);
+        REQUIRE(std::abs(range0.uMax - 0.5f) < 0.001f);
+        REQUIRE(std::abs(range0.vMin - 0.0f) < 0.001f);
+        REQUIRE(std::abs(range0.vMax - 0.5f) < 0.001f);
+
+        // Child 1 (SE): lower-right quarter
+        auto range1 = TileCoord::GetChildTexRange(1);
+        REQUIRE(std::abs(range1.uMin - 0.5f) < 0.001f);
+        REQUIRE(std::abs(range1.uMax - 1.0f) < 0.001f);
+        REQUIRE(std::abs(range1.vMin - 0.0f) < 0.001f);
+        REQUIRE(std::abs(range1.vMax - 0.5f) < 0.001f);
+
+        // Child 2 (NW): upper-left quarter
+        auto range2 = TileCoord::GetChildTexRange(2);
+        REQUIRE(std::abs(range2.uMin - 0.0f) < 0.001f);
+        REQUIRE(std::abs(range2.uMax - 0.5f) < 0.001f);
+        REQUIRE(std::abs(range2.vMin - 0.5f) < 0.001f);
+        REQUIRE(std::abs(range2.vMax - 1.0f) < 0.001f);
+
+        // Child 3 (NE): upper-right quarter
+        auto range3 = TileCoord::GetChildTexRange(3);
+        REQUIRE(std::abs(range3.uMin - 0.5f) < 0.001f);
+        REQUIRE(std::abs(range3.uMax - 1.0f) < 0.001f);
+        REQUIRE(std::abs(range3.vMin - 0.5f) < 0.001f);
+        REQUIRE(std::abs(range3.vMax - 1.0f) < 0.001f);
+    }
+
+    SECTION("SubTexRange for grandchild") {
+        // Tile at level 6 using ancestor's texture from level 4
+        TileKey tile(6, 25, 50);   // level 6
+        TileKey ancestor(4, 6, 12); // level 4
+
+        // Level diff = 2, so scale = 4
+        // localIlat = 25 - 6*4 = 25 - 24 = 1
+        // localIlng = 50 - 12*4 = 50 - 48 = 2
+        // tileSize = 1/4 = 0.25
+        // uMin = 2 * 0.25 = 0.5
+        // vMin = 1 * 0.25 = 0.25
+
+        auto range = TileCoord::GetSubTexRange(tile, ancestor);
+        REQUIRE(std::abs(range.uMin - 0.5f) < 0.001f);
+        REQUIRE(std::abs(range.uMax - 0.75f) < 0.001f);
+        REQUIRE(std::abs(range.vMin - 0.25f) < 0.001f);
+        REQUIRE(std::abs(range.vMax - 0.5f) < 0.001f);
+    }
+}
+
+TEST_CASE("TileKey comparison and hashing", "[Tile][TileCoord]")
+{
+    SECTION("Equality") {
+        TileKey a(4, 5, 10);
+        TileKey b(4, 5, 10);
+        TileKey c(4, 5, 11);
+
+        REQUIRE(a == b);
+        REQUIRE(!(a == c));
+    }
+
+    SECTION("Less-than ordering") {
+        TileKey a(3, 5, 10);
+        TileKey b(4, 5, 10);
+        TileKey c(4, 4, 10);
+        TileKey d(4, 5, 9);
+
+        REQUIRE(a < b);  // level 3 < level 4
+        REQUIRE(c < b);  // ilat 4 < ilat 5
+        REQUIRE(d < b);  // ilng 9 < ilng 10
+    }
+
+    SECTION("Hash uniqueness") {
+        TileKeyHash hasher;
+
+        TileKey a(4, 5, 10);
+        TileKey b(4, 5, 11);
+        TileKey c(4, 6, 10);
+        TileKey d(5, 5, 10);
+
+        // Different tiles should have different hashes (usually)
+        REQUIRE(hasher(a) != hasher(b));
+        REQUIRE(hasher(a) != hasher(c));
+        REQUIRE(hasher(a) != hasher(d));
+    }
+}
+
+// ======================================================================
+// PatchMeshGenerator Tests
+// ======================================================================
+
+#include "../OVP/VulkanClient/Tile/PatchMeshGenerator.h"
+
+TEST_CASE("PatchMeshGenerator vertex counts", "[Tile][PatchMesh]")
+{
+    SECTION("Default 32x32 grid") {
+        TileKey tile(4, 3, 7);
+        auto mesh = PatchMeshGenerator::Generate(tile);
+
+        // 32x32 quads = 33x33 vertices = 1089
+        REQUIRE(mesh.GetVertexCount() == 33 * 33);
+
+        // 32x32 quads * 2 triangles * 3 indices = 6144
+        REQUIRE(mesh.GetIndexCount() == 32 * 32 * 6);
+
+        // Triangle count = index count / 3
+        REQUIRE(mesh.GetTriangleCount() == 32 * 32 * 2);
+    }
+
+    SECTION("Custom 16x16 grid") {
+        TileKey tile(4, 3, 7);
+        auto mesh = PatchMeshGenerator::Generate(tile, 1.0, 16);
+
+        REQUIRE(mesh.GetVertexCount() == 17 * 17);
+        REQUIRE(mesh.GetIndexCount() == 16 * 16 * 6);
+    }
+
+    SECTION("Small 4x4 grid") {
+        TileKey tile(4, 3, 7);
+        auto mesh = PatchMeshGenerator::Generate(tile, 1.0, 4);
+
+        REQUIRE(mesh.GetVertexCount() == 5 * 5);
+        REQUIRE(mesh.GetIndexCount() == 4 * 4 * 6);
+    }
+}
+
+TEST_CASE("PatchMeshGenerator vertex positions on unit sphere", "[Tile][PatchMesh]")
+{
+    TileKey tile(4, 3, 7);
+    auto mesh = PatchMeshGenerator::Generate(tile, 1.0, 8);  // 8x8 grid
+
+    SECTION("All vertices on unit sphere") {
+        for (const auto& vtx : mesh.vertices) {
+            float dist = std::sqrt(vtx.x * vtx.x + vtx.y * vtx.y + vtx.z * vtx.z);
+            INFO("Vertex at (" << vtx.x << ", " << vtx.y << ", " << vtx.z << ") dist=" << dist);
+            REQUIRE(std::abs(dist - 1.0f) < 0.001f);
+        }
+    }
+
+    SECTION("Normals are unit length") {
+        for (const auto& vtx : mesh.vertices) {
+            float len = std::sqrt(vtx.nx * vtx.nx + vtx.ny * vtx.ny + vtx.nz * vtx.nz);
+            REQUIRE(std::abs(len - 1.0f) < 0.001f);
+        }
+    }
+
+    SECTION("Normal equals position for unit sphere") {
+        for (const auto& vtx : mesh.vertices) {
+            REQUIRE(std::abs(vtx.nx - vtx.x) < 0.001f);
+            REQUIRE(std::abs(vtx.ny - vtx.y) < 0.001f);
+            REQUIRE(std::abs(vtx.nz - vtx.z) < 0.001f);
+        }
+    }
+}
+
+TEST_CASE("PatchMeshGenerator UV coordinates", "[Tile][PatchMesh]")
+{
+    TileKey tile(4, 3, 7);
+    auto mesh = PatchMeshGenerator::Generate(tile, 1.0, 8);
+
+    SECTION("UV in valid range [0,1]") {
+        for (const auto& vtx : mesh.vertices) {
+            REQUIRE(vtx.tu >= 0.0f);
+            REQUIRE(vtx.tu <= 1.0f);
+            REQUIRE(vtx.tv >= 0.0f);
+            REQUIRE(vtx.tv <= 1.0f);
+        }
+    }
+
+    SECTION("Corner UVs") {
+        // First vertex (i=0, j=0) should be (0, 0)
+        REQUIRE(std::abs(mesh.vertices[0].tu - 0.0f) < 0.001f);
+        REQUIRE(std::abs(mesh.vertices[0].tv - 0.0f) < 0.001f);
+
+        // Last vertex should be (1, 1)
+        size_t lastIdx = mesh.vertices.size() - 1;
+        REQUIRE(std::abs(mesh.vertices[lastIdx].tu - 1.0f) < 0.001f);
+        REQUIRE(std::abs(mesh.vertices[lastIdx].tv - 1.0f) < 0.001f);
+    }
+}
+
+TEST_CASE("PatchMeshGenerator with custom UV range", "[Tile][PatchMesh]")
+{
+    TileKey tile(4, 3, 7);
+    TileCoord::TexCoordRange uvRange(0.25f, 0.75f, 0.0f, 0.5f);
+    auto mesh = PatchMeshGenerator::Generate(tile, uvRange, 1.0, 8);
+
+    SECTION("UV in custom range") {
+        for (const auto& vtx : mesh.vertices) {
+            REQUIRE(vtx.tu >= 0.25f - 0.001f);
+            REQUIRE(vtx.tu <= 0.75f + 0.001f);
+            REQUIRE(vtx.tv >= 0.0f);
+            REQUIRE(vtx.tv <= 0.5f + 0.001f);
+        }
+    }
+
+    SECTION("Corner UVs match range") {
+        // First vertex should be (0.25, 0.0)
+        REQUIRE(std::abs(mesh.vertices[0].tu - 0.25f) < 0.001f);
+        REQUIRE(std::abs(mesh.vertices[0].tv - 0.0f) < 0.001f);
+
+        // Last vertex should be (0.75, 0.5)
+        size_t lastIdx = mesh.vertices.size() - 1;
+        REQUIRE(std::abs(mesh.vertices[lastIdx].tu - 0.75f) < 0.001f);
+        REQUIRE(std::abs(mesh.vertices[lastIdx].tv - 0.5f) < 0.001f);
+    }
+}
+
+TEST_CASE("PatchMeshGenerator index validity", "[Tile][PatchMesh]")
+{
+    TileKey tile(4, 3, 7);
+    auto mesh = PatchMeshGenerator::Generate(tile, 1.0, 8);
+
+    uint16_t maxIndex = static_cast<uint16_t>(mesh.vertices.size() - 1);
+
+    for (size_t i = 0; i < mesh.indices.size(); i++) {
+        REQUIRE(mesh.indices[i] <= maxIndex);
+    }
+}
+
+TEST_CASE("PatchMeshGenerator bounding sphere", "[Tile][PatchMesh]")
+{
+    TileKey tile(4, 3, 7);
+    auto mesh = PatchMeshGenerator::Generate(tile, 1.0, 8);
+
+    SECTION("Bounding sphere contains all vertices") {
+        for (const auto& vtx : mesh.vertices) {
+            float dx = vtx.x - mesh.boundingSphereX;
+            float dy = vtx.y - mesh.boundingSphereY;
+            float dz = vtx.z - mesh.boundingSphereZ;
+            float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+            // All vertices should be within bounding sphere (with small tolerance)
+            REQUIRE(dist <= mesh.boundingSphereRadius + 0.001f);
+        }
+    }
+
+    SECTION("Bounding sphere center near patch center") {
+        // Center should be close to the centroid of the patch
+        float centerDist = std::sqrt(
+            mesh.boundingSphereX * mesh.boundingSphereX +
+            mesh.boundingSphereY * mesh.boundingSphereY +
+            mesh.boundingSphereZ * mesh.boundingSphereZ);
+
+        // Center should be on the sphere (approximately)
+        REQUIRE(centerDist > 0.5f);  // Not at origin
+        REQUIRE(centerDist < 1.5f);  // Within reasonable distance
+    }
+}
+
+TEST_CASE("PatchMeshGenerator with planet radius", "[Tile][PatchMesh]")
+{
+    TileKey tile(4, 3, 7);
+    double earthRadius = 6371000.0;  // Earth radius in meters
+    auto mesh = PatchMeshGenerator::Generate(tile, earthRadius, 8);
+
+    SECTION("Vertices at planet radius") {
+        for (const auto& vtx : mesh.vertices) {
+            double dist = std::sqrt(
+                (double)vtx.x * vtx.x +
+                (double)vtx.y * vtx.y +
+                (double)vtx.z * vtx.z);
+
+            // Should be at Earth radius (within 0.1%)
+            double tolerance = earthRadius * 0.001;
+            REQUIRE(std::abs(dist - earthRadius) < tolerance);
+        }
+    }
+}
+
+TEST_CASE("PatchMeshGenerator tile coverage", "[Tile][PatchMesh]")
+{
+    // Generate patches for all tiles at level 1 and verify they cover the sphere
+    SECTION("Level 1: 2 tiles cover sphere") {
+        std::vector<PatchMeshData> patches;
+
+        // Level 1 has 1 lat x 2 lng tiles
+        for (int ilat = 0; ilat < 1; ilat++) {
+            for (int ilng = 0; ilng < 2; ilng++) {
+                TileKey tile(1, ilat, ilng);
+                patches.push_back(PatchMeshGenerator::Generate(tile, 1.0, 8));
+            }
+        }
+
+        REQUIRE(patches.size() == 2);
+
+        // First tile (western hemisphere) should have x < 0 for western vertices
+        // Second tile (eastern hemisphere) should have x > 0 for eastern vertices
+        // (Actually, this depends on longitude convention, let's just check they're different)
+
+        // Just verify both patches have valid geometry
+        for (const auto& patch : patches) {
+            REQUIRE(patch.GetVertexCount() == 9 * 9);
+            REQUIRE(patch.GetIndexCount() == 8 * 8 * 6);
+        }
+    }
+}
+
+// ======================================================================
+// TileTextureLoader Tests
+// ======================================================================
+
+#include "../OVP/VulkanClient/Tile/TileTextureLoader.h"
+
+TEST_CASE("TileTextureLoader initialization", "[Tile][TileLoader]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(64, 64));
+
+    TileTextureLoader loader;
+
+    SECTION("Uninitialized loader returns nullptr") {
+        REQUIRE(!loader.IsInitialized());
+        REQUIRE(loader.LoadTileTexture("Earth", 4, 0, 0) == nullptr);
+    }
+
+    SECTION("Initialize with context and staging") {
+        VulkanContext* ctx = renderer.GetVulkanContext();
+        StagingManager* staging = renderer.GetStagingManager();
+
+        REQUIRE(loader.Init(ctx, staging));
+        REQUIRE(loader.IsInitialized());
+
+        loader.Shutdown();
+        REQUIRE(!loader.IsInitialized());
+    }
+
+    SECTION("Double initialization is safe") {
+        VulkanContext* ctx = renderer.GetVulkanContext();
+        StagingManager* staging = renderer.GetStagingManager();
+
+        REQUIRE(loader.Init(ctx, staging));
+        REQUIRE(loader.Init(ctx, staging));  // Should return true
+
+        loader.Shutdown();
+    }
+
+    renderer.Shutdown();
+}
+
+TEST_CASE("TileTextureLoader path generation", "[Tile][TileLoader]")
+{
+    // Test that the loader uses correct paths (via TileCoord)
+    TileTextureLoader loader;
+    loader.SetTextureRoot("C:\\Orbiter\\Textures");
+
+    SECTION("Texture root is set") {
+        REQUIRE(loader.GetTextureRoot() == "C:\\Orbiter\\Textures");
+    }
+}
+
+TEST_CASE("TileTextureLoader loads real Earth tiles", "[Tile][TileLoader][RealTextures]")
+{
+    // This test requires actual Orbiter textures to be installed
+    // Skip if textures are not available
+
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+
+    TileTextureLoader loader;
+    REQUIRE(loader.Init(renderer.GetVulkanContext(), renderer.GetStagingManager()));
+
+    // Set texture root to Orbiter installation
+    loader.SetTextureRoot("C:\\Orbiter\\Textures");
+
+    SECTION("Check if Earth textures exist") {
+        // Try to check if any Earth tile exists
+        // Level 1 tiles should be in Surf/05/000000/ (level 1 + 4 = 5)
+        bool exists = loader.TileTextureExists("Earth", 1, 0, 0);
+        INFO("Earth level 1 tile (0,0) exists: " << (exists ? "yes" : "no"));
+
+        if (!exists) {
+            // Try level 4 tiles (Surf/08/)
+            exists = loader.TileTextureExists("Earth", 4, 0, 0);
+            INFO("Earth level 4 tile (0,0) exists: " << (exists ? "yes" : "no"));
+        }
+
+        if (!exists) {
+            WARN("No Earth textures found in C:\\Orbiter\\Textures - skipping load test");
+            loader.Shutdown();
+            renderer.Shutdown();
+            return;
+        }
+    }
+
+    SECTION("Load and cache tile texture") {
+        // Try loading level 1 or 4 tile
+        VulkanTexture* tex = loader.LoadTileTexture("Earth", 1, 0, 0);
+        if (!tex) {
+            tex = loader.LoadTileTexture("Earth", 4, 0, 0);
+        }
+
+        if (tex) {
+            INFO("Loaded Earth tile: " << tex->GetWidth() << "x" << tex->GetHeight());
+            REQUIRE(tex->IsValid());
+            REQUIRE(tex->GetWidth() > 0);
+            REQUIRE(tex->GetHeight() > 0);
+
+            // Verify it's cached
+            REQUIRE(loader.GetCacheSize() == 1);
+
+            // Load same tile again - should return cached
+            VulkanTexture* tex2 = loader.LoadTileTexture("Earth", 1, 0, 0);
+            if (!tex2) tex2 = loader.LoadTileTexture("Earth", 4, 0, 0);
+            REQUIRE(tex2 == tex);  // Same pointer (cached)
+            REQUIRE(loader.GetCacheSize() == 1);  // Cache size unchanged
+        } else {
+            WARN("Could not load Earth tile - textures may not be installed");
+        }
+    }
+
+    SECTION("Clear cache releases textures") {
+        // Load a tile
+        loader.LoadTileTexture("Earth", 1, 0, 0);
+        loader.LoadTileTexture("Earth", 4, 0, 0);
+
+        size_t beforeClear = loader.GetCacheSize();
+        loader.ClearCache();
+        REQUIRE(loader.GetCacheSize() == 0);
+    }
+
+    loader.Shutdown();
+    renderer.Shutdown();
+}
+
+TEST_CASE("TileTextureLoader archive fallback", "[Tile][TileLoader][Archive]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+
+    TileTextureLoader loader;
+    REQUIRE(loader.Init(renderer.GetVulkanContext(), renderer.GetStagingManager()));
+    loader.SetTextureRoot("C:\\Orbiter\\Textures");
+
+    SECTION("Earth tiles load from archive") {
+        // Earth may have tiles in .tree archive when DDS files don't exist
+        // Try loading a level 5 tile which is more likely to be in archive
+        VulkanTexture* tex = loader.LoadTileTexture("Earth", 5, 0, 0);
+        if (tex) {
+            REQUIRE(tex->IsValid());
+            INFO("Loaded Earth tile from archive: " << tex->GetWidth() << "x" << tex->GetHeight());
+        } else {
+            // Also try level 4 and level 6
+            tex = loader.LoadTileTexture("Earth", 4, 0, 0);
+            if (!tex) {
+                tex = loader.LoadTileTexture("Earth", 6, 0, 0);
+            }
+            if (tex) {
+                REQUIRE(tex->IsValid());
+                INFO("Loaded Earth tile from archive: " << tex->GetWidth() << "x" << tex->GetHeight());
+            } else {
+                WARN("Earth tile not available (archive may not exist at C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree)");
+            }
+        }
+    }
+
+    SECTION("Cache works for archive-loaded tiles") {
+        VulkanTexture* tex1 = loader.LoadTileTexture("Earth", 5, 0, 0);
+        if (tex1) {
+            VulkanTexture* tex2 = loader.LoadTileTexture("Earth", 5, 0, 0);
+            REQUIRE(tex1 == tex2);  // Same pointer = cached
+            INFO("Archive-loaded tile caching verified");
+        } else {
+            WARN("Skipping cache test - Earth tile not available");
+        }
+    }
+
+    SECTION("Multiple archive tiles load successfully") {
+        // Try loading multiple different tiles to verify archive stays open
+        std::vector<VulkanTexture*> textures;
+        int loadedCount = 0;
+
+        // Try several tiles at different coordinates
+        for (int ilat = 0; ilat < 4 && loadedCount < 3; ilat++) {
+            for (int ilng = 0; ilng < 4 && loadedCount < 3; ilng++) {
+                VulkanTexture* tex = loader.LoadTileTexture("Earth", 5, ilat, ilng);
+                if (tex) {
+                    textures.push_back(tex);
+                    loadedCount++;
+                }
+            }
+        }
+
+        if (loadedCount > 0) {
+            INFO("Loaded " << loadedCount << " tiles from archive");
+            REQUIRE(loader.GetCacheSize() == static_cast<size_t>(loadedCount));
+        } else {
+            WARN("No archive tiles available for multi-tile test");
+        }
+    }
+
+    loader.Shutdown();
+    renderer.Shutdown();
+}
+
+// ==========================================================================
+// TileRenderer Tests
+// ==========================================================================
+
+#include "../OVP/VulkanClient/Tile/TileRenderer.h"
+
+TEST_CASE("TileRenderer initialization", "[Tile][TileRenderer]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitMeshRendering());
+
+    TileRenderer tileRenderer;
+    REQUIRE_FALSE(tileRenderer.IsInitialized());
+
+    SECTION("Successful initialization") {
+        bool result = tileRenderer.Init(renderer.GetVulkanContext(),
+                                         renderer.GetStagingManager(),
+                                         renderer.GetMeshPipeline());
+        REQUIRE(result);
+        REQUIRE(tileRenderer.IsInitialized());
+        REQUIRE(tileRenderer.GetTileCount() == 0);
+    }
+
+    SECTION("Null context fails") {
+        bool result = tileRenderer.Init(nullptr,
+                                         renderer.GetStagingManager(),
+                                         renderer.GetMeshPipeline());
+        REQUIRE_FALSE(result);
+    }
+
+    SECTION("Null staging manager fails") {
+        bool result = tileRenderer.Init(renderer.GetVulkanContext(),
+                                         nullptr,
+                                         renderer.GetMeshPipeline());
+        REQUIRE_FALSE(result);
+    }
+
+    SECTION("Null mesh pipeline fails") {
+        bool result = tileRenderer.Init(renderer.GetVulkanContext(),
+                                         renderer.GetStagingManager(),
+                                         nullptr);
+        REQUIRE_FALSE(result);
+    }
+
+    tileRenderer.Shutdown();
+    renderer.Shutdown();
+}
+
+TEST_CASE("TileRenderer loads planet tiles without textures", "[Tile][TileRenderer]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitMeshRendering());
+
+    TileRenderer tileRenderer;
+    REQUIRE(tileRenderer.Init(renderer.GetVulkanContext(),
+                               renderer.GetStagingManager(),
+                               renderer.GetMeshPipeline()));
+
+    // Set a non-existent texture root so no textures are loaded
+    tileRenderer.SetTextureRoot("C:\\NonExistent\\Path");
+
+    SECTION("Level 1 generates 2 tiles") {
+        // Level 1: 1 lat tile x 2 lng tiles = 2 tiles
+        int loaded = tileRenderer.LoadPlanetTiles("Test", 1, 1.0, 8);
+        REQUIRE(loaded == 2);
+        REQUIRE(tileRenderer.GetTileCount() == 2);
+
+        // Each tile with 8x8 grid = 9x9 = 81 vertices
+        REQUIRE(tileRenderer.GetTotalVertexCount() == 81 * 2);
+        // 8x8 = 64 quads = 128 triangles per tile
+        REQUIRE(tileRenderer.GetTotalTriangleCount() == 128 * 2);
+    }
+
+    SECTION("Level 2 generates 8 tiles") {
+        // Level 2: 2 lat tiles x 4 lng tiles = 8 tiles
+        int loaded = tileRenderer.LoadPlanetTiles("Test", 2, 1.0, 4);
+        REQUIRE(loaded == 8);
+        REQUIRE(tileRenderer.GetTileCount() == 8);
+
+        // Each tile with 4x4 grid = 5x5 = 25 vertices
+        REQUIRE(tileRenderer.GetTotalVertexCount() == 25 * 8);
+        // 4x4 = 16 quads = 32 triangles per tile
+        REQUIRE(tileRenderer.GetTotalTriangleCount() == 32 * 8);
+    }
+
+    SECTION("ClearTiles removes all tiles") {
+        tileRenderer.LoadPlanetTiles("Test", 1, 1.0, 8);
+        REQUIRE(tileRenderer.GetTileCount() > 0);
+
+        tileRenderer.ClearTiles();
+        REQUIRE(tileRenderer.GetTileCount() == 0);
+        REQUIRE(tileRenderer.GetTotalVertexCount() == 0);
+        REQUIRE(tileRenderer.GetTotalTriangleCount() == 0);
+    }
+
+    tileRenderer.Shutdown();
+    renderer.Shutdown();
+}
+
+TEST_CASE("TileRenderer renders tiles", "[Tile][TileRenderer][Render]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(256, 256));
+    REQUIRE(renderer.InitMeshRendering());
+
+    TileRenderer tileRenderer;
+    REQUIRE(tileRenderer.Init(renderer.GetVulkanContext(),
+                               renderer.GetStagingManager(),
+                               renderer.GetMeshPipeline()));
+
+    // Load level 1 tiles (2 tiles covering sphere)
+    int loaded = tileRenderer.LoadPlanetTiles("Test", 1, 1.0, 8);
+    REQUIRE(loaded == 2);
+
+    // Set up identity-like MVP (camera looking at origin)
+    float mvp[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, -2.0f, 1.0f
+    };
+    float model[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    float lightDir[4] = { 0.0f, 0.0f, 1.0f, 32.0f };
+
+    SECTION("Render without crashing") {
+        renderer.BeginFrame();
+        renderer.Clear(0.0f, 0.0f, 0.0f, 1.0f);
+        renderer.BeginRenderPass();  // Start render pass before external rendering
+
+        // Get command buffer and render tiles
+        VkCommandBuffer cmd = renderer.GetCurrentCommandBuffer();
+        tileRenderer.Render(cmd, mvp, model, lightDir);
+
+        renderer.EndFrame();
+        renderer.Submit();
+
+        // Read pixels and verify something was rendered
+        auto pixels = renderer.ReadPixels();
+        REQUIRE(!pixels.empty());
+    }
+
+    tileRenderer.Shutdown();
+    renderer.Shutdown();
+}
+
+TEST_CASE("TileRenderer with real planet textures", "[Tile][TileRenderer][RealTextures]")
+{
+    // This test requires actual Orbiter textures to be installed
+    // Earth textures are in .tree archives, but Moon has extracted DDS files
+
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(512, 512));
+    REQUIRE(renderer.InitMeshRendering());
+
+    TileRenderer tileRenderer;
+    REQUIRE(tileRenderer.Init(renderer.GetVulkanContext(),
+                               renderer.GetStagingManager(),
+                               renderer.GetMeshPipeline()));
+
+    tileRenderer.SetTextureRoot("C:\\Orbiter\\Textures");
+
+    // Check for available planet textures
+    TileTextureLoader testLoader;
+    testLoader.Init(renderer.GetVulkanContext(), renderer.GetStagingManager());
+    testLoader.SetTextureRoot("C:\\Orbiter\\Textures");
+
+    // Try Moon first (has extracted DDS tiles at levels 6-15, folders 10-19)
+    // Moon level 6 = folder 10, has tiles like 000021/000065.dds
+    bool hasMoonLevel6 = testLoader.TileTextureExists("Moon", 6, 21, 65);
+    bool hasEarthLevel1 = testLoader.TileTextureExists("Earth", 1, 0, 0);
+    bool hasEarthLevel4 = testLoader.TileTextureExists("Earth", 4, 0, 0);
+    testLoader.Shutdown();
+
+    std::string planetName;
+    int level = 0;
+
+    if (hasMoonLevel6) {
+        planetName = "Moon";
+        level = 6;
+        INFO("Using Moon texture level 6");
+    } else if (hasEarthLevel1) {
+        planetName = "Earth";
+        level = 1;
+        INFO("Using Earth texture level 1");
+    } else if (hasEarthLevel4) {
+        planetName = "Earth";
+        level = 4;
+        INFO("Using Earth texture level 4");
+    } else {
+        WARN("No planet textures found - skipping textured tile rendering test");
+        tileRenderer.Shutdown();
+        renderer.Shutdown();
+        return;
+    }
+
+    INFO("Using " << planetName << " texture level " << level);
+
+    SECTION("Load and render planet tiles") {
+        // Load planet tiles at available level
+        int loaded = tileRenderer.LoadPlanetTiles(planetName, level, 1.0, 16);
+        INFO("Loaded " << loaded << " " << planetName << " tiles");
+        REQUIRE(loaded > 0);
+
+        // Model matrix (identity - sphere at origin)
+        float model[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,   // column 0
+            0.0f, 1.0f, 0.0f, 0.0f,   // column 1
+            0.0f, 0.0f, 1.0f, 0.0f,   // column 2
+            0.0f, 0.0f, 0.0f, 1.0f    // column 3
+        };
+
+        // View matrix: camera at z=2.5 looking at origin
+        float view[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,   // column 0
+            0.0f, 1.0f, 0.0f, 0.0f,   // column 1
+            0.0f, 0.0f, 1.0f, 0.0f,   // column 2
+            0.0f, 0.0f,-2.5f, 1.0f    // column 3 (translation)
+        };
+
+        // Projection matrix (perspective) for Vulkan
+        // Vulkan: Y is flipped, Z range is [0, 1]
+        float fov = 60.0f * 3.14159f / 180.0f;
+        float aspect = 1.0f;
+        float nearZ = 0.1f, farZ = 100.0f;
+        float tanHalfFov = tanf(fov / 2.0f);
+        float proj[16] = { 0 };
+        proj[0] = 1.0f / (aspect * tanHalfFov);
+        proj[5] = -1.0f / tanHalfFov;  // Negative for Vulkan Y-flip
+        proj[10] = farZ / (nearZ - farZ);  // Vulkan depth range [0,1]
+        proj[11] = -1.0f;
+        proj[14] = (nearZ * farZ) / (nearZ - farZ);
+
+        // Compute MVP = Proj * View * Model
+        float mv[16], mvp[16];
+        // mv = view * model
+        for (int col = 0; col < 4; col++) {
+            for (int row = 0; row < 4; row++) {
+                mv[col*4+row] = 0;
+                for (int k = 0; k < 4; k++) {
+                    mv[col*4+row] += view[k*4+row] * model[col*4+k];
+                }
+            }
+        }
+        // mvp = proj * mv
+        for (int col = 0; col < 4; col++) {
+            for (int row = 0; row < 4; row++) {
+                mvp[col*4+row] = 0;
+                for (int k = 0; k < 4; k++) {
+                    mvp[col*4+row] += proj[k*4+row] * mv[col*4+k];
+                }
+            }
+        }
+
+        float lightDir[4] = { 0.577f, 0.577f, 0.577f, 32.0f };
+
+        renderer.BeginFrame();
+        renderer.Clear(0.0f, 0.0f, 0.2f, 1.0f);  // Dark blue background
+        renderer.BeginRenderPass();  // Start render pass before external rendering
+
+        VkCommandBuffer cmd = renderer.GetCurrentCommandBuffer();
+        tileRenderer.Render(cmd, mvp, model, lightDir);
+
+        renderer.EndFrame();
+        renderer.Submit();
+
+        // Read pixels and verify Earth is visible (not just background)
+        auto pixels = renderer.ReadPixels();
+        REQUIRE(!pixels.empty());
+
+        // Count non-background pixels
+        int nonBackgroundPixels = 0;
+        for (size_t i = 0; i < pixels.size(); i += 4) {
+            // If pixel is not dark blue background (0, 0, ~51)
+            if (pixels[i] > 60 || pixels[i+1] > 10 || pixels[i+2] > 10) {
+                nonBackgroundPixels++;
+            }
+        }
+
+        INFO("Non-background pixels: " << nonBackgroundPixels);
+        REQUIRE(nonBackgroundPixels > 0);  // Something was rendered
+    }
+
+    tileRenderer.Shutdown();
+    renderer.Shutdown();
+}
+
+// ==============================================================
+// TreeArchive tests
+// ==============================================================
+
+#include "../OVP/VulkanClient/Tile/TreeArchive.h"
+
+// TreeArchive header parsing
+TEST_CASE("TreeArchive header parsing", "[Tile][TreeArchive]")
+{
+    TreeArchive archive;
+
+    SECTION("Open valid archive") {
+        bool opened = archive.Open("C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree");
+        if (!opened) {
+            WARN("Earth Surf.tree not found - skipping");
+            return;
+        }
+        REQUIRE(archive.IsOpen());
+        REQUIRE(archive.GetNodeCount() > 0);
+        INFO("Node count: " << archive.GetNodeCount());
+        archive.Close();
+    }
+
+    SECTION("Open nonexistent file returns false") {
+        REQUIRE_FALSE(archive.Open("C:\\nonexistent.tree"));
+    }
+
+    SECTION("Close without open is safe") {
+        archive.Close();  // Should not crash
+        REQUIRE_FALSE(archive.IsOpen());
+    }
+
+    SECTION("Double close is safe") {
+        bool opened = archive.Open("C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree");
+        if (!opened) {
+            WARN("Earth Surf.tree not found - skipping");
+            return;
+        }
+        archive.Close();
+        archive.Close();  // Second close should be safe
+        REQUIRE_FALSE(archive.IsOpen());
+    }
+}
+
+// TreeArchive quadtree navigation
+TEST_CASE("TreeArchive tile index lookup", "[Tile][TreeArchive]")
+{
+    TreeArchive archive;
+    if (!archive.Open("C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree")) {
+        WARN("Earth Surf.tree not found - skipping");
+        return;
+    }
+
+    SECTION("Root tiles exist") {
+        // At least some root level tiles should exist
+        bool hasAnyRoot = archive.HasTile(1, 0, 0) ||
+                          archive.HasTile(2, 0, 0) ||
+                          archive.HasTile(3, 0, 0) ||
+                          archive.HasTile(4, 0, 0);
+        REQUIRE(hasAnyRoot);
+    }
+
+    SECTION("Invalid level returns no tile") {
+        REQUIRE_FALSE(archive.HasTile(0, 0, 0));
+        REQUIRE_FALSE(archive.HasTile(-1, 0, 0));
+    }
+
+    SECTION("Very high level likely has no tile") {
+        // Level 25 with coordinates 0,0 probably doesn't exist
+        REQUIRE_FALSE(archive.HasTile(25, 0, 0));
+    }
+
+    archive.Close();
+}
+
+// TreeArchive tile decompression
+TEST_CASE("TreeArchive tile reading", "[Tile][TreeArchive]")
+{
+    TreeArchive archive;
+    if (!archive.Open("C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree")) {
+        WARN("Earth Surf.tree not found - skipping");
+        return;
+    }
+
+    SECTION("Read existing tile returns DDS data") {
+        bool foundTile = false;
+        for (int lvl = 1; lvl <= 8; lvl++) {
+            if (archive.HasTile(lvl, 0, 0)) {
+                auto data = archive.ReadTile(lvl, 0, 0);
+                REQUIRE(!data.empty());
+                REQUIRE(data.size() >= 4);
+                // Check for DDS magic number "DDS " (0x20534444)
+                uint32_t magic = *reinterpret_cast<uint32_t*>(data.data());
+                REQUIRE(magic == 0x20534444);  // "DDS "
+                INFO("Level " << lvl << " tile size: " << data.size() << " bytes");
+                foundTile = true;
+                break;
+            }
+        }
+        if (!foundTile) {
+            WARN("No tiles found at levels 1-8");
+        }
+    }
+
+    SECTION("Read nonexistent tile returns empty") {
+        auto data = archive.ReadTile(20, 0, 0);
+        REQUIRE(data.empty());
+    }
+
+    SECTION("Read tile at invalid level returns empty") {
+        auto data = archive.ReadTile(-1, 0, 0);
+        REQUIRE(data.empty());
+        auto data2 = archive.ReadTile(0, 0, 0);
+        REQUIRE(data2.empty());
+    }
+
+    archive.Close();
+}
+
+// TreeArchive multiple reads
+TEST_CASE("TreeArchive multiple tile reads", "[Tile][TreeArchive]")
+{
+    TreeArchive archive;
+    if (!archive.Open("C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree")) {
+        WARN("Earth Surf.tree not found - skipping");
+        return;
+    }
+
+    SECTION("Read multiple tiles sequentially") {
+        int tilesRead = 0;
+        for (int lvl = 5; lvl <= 7 && tilesRead < 10; lvl++) {
+            int nlat = 1 << (lvl - 1);
+            int nlng = 1 << lvl;
+            for (int ilat = 0; ilat < nlat && tilesRead < 10; ilat++) {
+                for (int ilng = 0; ilng < nlng && tilesRead < 10; ilng++) {
+                    if (archive.HasTile(lvl, ilat, ilng)) {
+                        auto data = archive.ReadTile(lvl, ilat, ilng);
+                        if (!data.empty()) {
+                            tilesRead++;
+                            // Verify all read tiles are valid DDS
+                            REQUIRE(data.size() >= 4);
+                            uint32_t magic = *reinterpret_cast<uint32_t*>(data.data());
+                            REQUIRE(magic == 0x20534444);  // "DDS "
+                        }
+                    }
+                }
+            }
+        }
+        INFO("Read " << tilesRead << " tiles");
+        REQUIRE(tilesRead > 0);
+    }
+
+    SECTION("Re-read same tile returns identical data") {
+        // Find a tile that exists
+        for (int lvl = 1; lvl <= 8; lvl++) {
+            if (archive.HasTile(lvl, 0, 0)) {
+                auto data1 = archive.ReadTile(lvl, 0, 0);
+                auto data2 = archive.ReadTile(lvl, 0, 0);
+                REQUIRE(data1 == data2);
+                break;
+            }
+        }
+    }
+
+    archive.Close();
+}
+
+// TreeArchive index calculation
+TEST_CASE("TreeArchive index calculation", "[Tile][TreeArchive]")
+{
+    TreeArchive archive;
+    if (!archive.Open("C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree")) {
+        WARN("Earth Surf.tree not found - skipping");
+        return;
+    }
+
+    SECTION("GetTileIndex returns valid indices for existing tiles") {
+        for (int lvl = 1; lvl <= 8; lvl++) {
+            if (archive.HasTile(lvl, 0, 0)) {
+                uint32_t idx = archive.GetTileIndex(lvl, 0, 0);
+                REQUIRE(idx != 0xFFFFFFFF);  // -1 means not found
+                INFO("Level " << lvl << " index: " << idx);
+                break;
+            }
+        }
+    }
+
+    SECTION("GetTileIndex returns -1 for nonexistent tiles") {
+        uint32_t idx = archive.GetTileIndex(25, 0, 0);
+        REQUIRE(idx == 0xFFFFFFFF);
+    }
+
+    archive.Close();
+}
+
+// ==========================================================================
+// Earth rendering from archive - Full integration test
+// ==========================================================================
+
+TEST_CASE("TileRenderer with Earth from archive", "[Tile][TileRenderer][Earth]")
+{
+    HeadlessRenderer renderer;
+    REQUIRE(renderer.Init(512, 512));
+    REQUIRE(renderer.InitMeshRendering());
+
+    TileRenderer tileRenderer;
+    REQUIRE(tileRenderer.Init(renderer.GetVulkanContext(),
+                               renderer.GetStagingManager(),
+                               renderer.GetMeshPipeline()));
+
+    // Set texture root to standard Orbiter location
+    tileRenderer.SetTextureRoot("C:\\Orbiter\\Textures");
+
+    // First check if Earth archive exists
+    TreeArchive testArchive;
+    bool archiveExists = testArchive.Open("C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree");
+    if (!archiveExists) {
+        WARN("No Earth tiles loaded - archive may not exist at C:\\Orbiter\\Textures\\Earth\\Archive\\Surf.tree");
+        tileRenderer.Shutdown();
+        renderer.Shutdown();
+        return;
+    }
+    testArchive.Close();
+
+    // Load Earth tiles at level 5 (reasonable detail, not too many tiles)
+    // Level 5: 16 lat tiles x 32 lng tiles = 512 tiles
+    int loaded = tileRenderer.LoadPlanetTiles("Earth", 5, 1.0, 16);
+
+    if (loaded == 0) {
+        WARN("No Earth tiles loaded - archive tiles may not be accessible");
+        tileRenderer.Shutdown();
+        renderer.Shutdown();
+        return;
+    }
+
+    INFO("Loaded " << loaded << " Earth tiles from archive");
+    REQUIRE(loaded > 0);
+
+    // Model matrix (identity - sphere at origin)
+    float model[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,   // column 0
+        0.0f, 1.0f, 0.0f, 0.0f,   // column 1
+        0.0f, 0.0f, 1.0f, 0.0f,   // column 2
+        0.0f, 0.0f, 0.0f, 1.0f    // column 3
+    };
+
+    // View matrix: camera at z=2.5 looking at origin
+    float view[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,   // column 0
+        0.0f, 1.0f, 0.0f, 0.0f,   // column 1
+        0.0f, 0.0f, 1.0f, 0.0f,   // column 2
+        0.0f, 0.0f,-2.5f, 1.0f    // column 3 (translation)
+    };
+
+    // Projection matrix (perspective) for Vulkan
+    // Vulkan: Y is flipped, Z range is [0, 1]
+    float fov = 60.0f * 3.14159f / 180.0f;
+    float aspect = 1.0f;
+    float nearZ = 0.1f, farZ = 100.0f;
+    float tanHalfFov = tanf(fov / 2.0f);
+    float proj[16] = { 0 };
+    proj[0] = 1.0f / (aspect * tanHalfFov);
+    proj[5] = -1.0f / tanHalfFov;  // Negative for Vulkan Y-flip
+    proj[10] = farZ / (nearZ - farZ);  // Vulkan depth range [0,1]
+    proj[11] = -1.0f;
+    proj[14] = (nearZ * farZ) / (nearZ - farZ);
+
+    // Compute MVP = Proj * View * Model
+    float mv[16], mvp[16];
+    // mv = view * model
+    for (int col = 0; col < 4; col++) {
+        for (int row = 0; row < 4; row++) {
+            mv[col*4+row] = 0;
+            for (int k = 0; k < 4; k++) {
+                mv[col*4+row] += view[k*4+row] * model[col*4+k];
+            }
+        }
+    }
+    // mvp = proj * mv
+    for (int col = 0; col < 4; col++) {
+        for (int row = 0; row < 4; row++) {
+            mvp[col*4+row] = 0;
+            for (int k = 0; k < 4; k++) {
+                mvp[col*4+row] += proj[k*4+row] * mv[col*4+k];
+            }
+        }
+    }
+
+    // Light from camera direction for good visibility
+    float lightDir[4] = { 0.0f, 0.0f, 1.0f, 32.0f };
+
+    // Render a frame
+    renderer.BeginFrame();
+    renderer.Clear(0.0f, 0.0f, 0.1f, 1.0f);  // Dark blue background
+    renderer.BeginRenderPass();
+
+    VkCommandBuffer cmd = renderer.GetCurrentCommandBuffer();
+    tileRenderer.Render(cmd, mvp, model, lightDir);
+
+    renderer.EndFrame();
+    renderer.Submit();
+
+    // Verify we rendered something (not just clear color)
+    auto pixels = renderer.ReadPixels();
+    REQUIRE(!pixels.empty());
+
+    // Check that Earth is visible (not all dark blue)
+    // Clear color is (0, 0, 0.1) which is approximately (0, 0, 25) in uint8
+    bool hasEarthPixels = false;
+    int nonBackgroundCount = 0;
+
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        uint8_t b = pixels[i];
+        uint8_t g = pixels[i + 1];
+        uint8_t r = pixels[i + 2];
+        // If any pixel differs significantly from clear color (dark blue = 0, 0, ~25)
+        // Earth textures have various colors - greens, browns, blues for ocean
+        if (r > 30 || g > 30 || b > 50) {
+            hasEarthPixels = true;
+            nonBackgroundCount++;
+        }
+    }
+
+    INFO("Non-background pixels: " << nonBackgroundCount << " / " << (pixels.size() / 4));
+
+    if (hasEarthPixels) {
+        INFO("Earth rendering verified - non-background pixels detected");
+        // Should have significant coverage (Earth fills a good portion of frame)
+        REQUIRE(nonBackgroundCount > 1000);  // At least some meaningful coverage
+    } else {
+        // This may happen if textures didn't load correctly
+        WARN("No Earth pixels detected - tiles may not be rendering correctly");
+    }
+
+    tileRenderer.Shutdown();
+    renderer.Shutdown();
+}

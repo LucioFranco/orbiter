@@ -36,6 +36,7 @@ public:
     // Rendering
     void BeginFrame();
     void Clear(float r, float g, float b, float a);
+    void BeginRenderPass();  // Start render pass (for external rendering)
     void RenderScene();  // Renders 3D scene using SceneRenderer
     void EndFrame();
     void Submit();
