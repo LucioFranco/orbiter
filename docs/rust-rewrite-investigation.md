@@ -3,6 +3,8 @@
 > **Scope.** This report explains how the Orbiter engine works, from process startup to pixels on screen. Its purpose is to inform a rewrite of the core engine and/or graphics in Rust that runs on **macOS (priority), Linux and Windows**.
 >
 > **Snapshot.** The fork branch was fast-forwarded to upstream `orbitersim/orbiter@4137930` (merge of PR #679, 2026-09-24). The fork was 41 commits behind. All file/line references in this report are to that commit.
+>
+> **Follow-up:** with the goal narrowed to *running NASSP natively on macOS*, see [`nassp-macos-recommendation.md`](./nassp-macos-recommendation.md). It re-orders the roadmap below: a Rust renderer first, the C++ core ported rather than rewritten, and the Rust core deferred with NASSP as its conformance suite.
 
 ---
 
