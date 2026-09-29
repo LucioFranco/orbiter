@@ -4,7 +4,7 @@
 >
 > **Snapshot.** The fork branch was fast-forwarded to upstream `orbitersim/orbiter@4137930` (merge of PR #679, 2026-09-24). The fork was 41 commits behind. All file/line references in this report are to that commit.
 >
-> **Follow-up:** with the goal narrowed to *running NASSP natively on macOS*, see [`nassp-macos-recommendation.md`](./nassp-macos-recommendation.md). It re-orders the roadmap below: a Rust renderer first, the C++ core ported rather than rewritten, and the Rust core deferred with NASSP as its conformance suite.
+> **Follow-up:** the project is now a **private, local-only experiment** racing to run NASSP natively on macOS, with Windows and Linux on the same code path. The active plan is [`nassp-macos-recommendation.md`](./nassp-macos-recommendation.md). Where this report recommends upstreaming, preserving the binary ABI or coordinating with maintainers, that no longer applies. Its technical analysis of the engine, physics and renderer still does.
 
 ---
 

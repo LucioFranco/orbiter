@@ -1,158 +1,161 @@
-# Recommendation: Running NASSP Natively on macOS
+# NASSP on macOS: Race Plan (Private Experiment)
 
-> Companion to [`rust-rewrite-investigation.md`](./rust-rewrite-investigation.md). That report surveyed the engine and the rewrite options in general. This one fixes the goal, **"NASSP (Project Apollo) playable natively on Apple Silicon macOS"**, and derives a concrete plan from it.
+> Companion to [`rust-rewrite-investigation.md`](./rust-rewrite-investigation.md).
+>
+> **Framing:**
+> - This is a **private, local-only experiment**. Nothing here is intended for upstream, so compatibility with upstream Orbiter, Orbiter 2016 binaries or the NASSP maintainers' build is **not** a constraint. APIs can be broken, and NASSP call sites edited directly.
+> - **Targets:** macOS (Apple Silicon) first, with **Windows and Linux on the same code path**, no per-OS renderer.
+> - **Priority:** time until NASSP flies on a Mac.
 >
 > **Sources examined:**
 > - `orbitersim/orbiter@4137930` (this branch).
-> - `orbiternassp/NASSP@1eb12c8` (`Orbiter2016` branch, 2026-09-29).
-> - CaptainSwag101's `CMake` branch (head of NASSP PR [#1288](https://github.com/orbiternassp/NASSP/pull/1288), `96b6380`, 2026-05-30).
-> - `CMake-RenderingOverhaul` (`356b932`).
->
-> All counts come from `grep` over `Orbitersdk/samples/ProjectApollo`.
+> - `orbiternassp/NASSP@1eb12c8` (`Orbiter2016`, 2026-09-29).
+> - CaptainSwag101's NASSP `CMake` branch (`96b6380`, 2026-05-30; head of NASSP PR #1288).
+> - TheGondos's `orbiter@linux` (`ad96494`, 2024-05-17) and `NASSP@4c2de5a` (2023-07-05).
 
 ---
 
-## 1. Bottom Line
+## 1. The Plan in One Paragraph
 
-1. **NASSP is about 400k lines of C++ written against Orbiter's C++ API.** That is larger than Orbiter's own core (~85k). It will not be rewritten. Whatever engine runs NASSP on a Mac must therefore **load C++ addon code compiled for arm64 against a C++ Orbiter SDK**. This holds whether the engine itself is C++ or Rust.
-2. The **critical path** to NASSP on macOS is:
-   1. a portable Orbiter core plus SDK;
-   2. a Metal-capable graphics client;
-   3. a set of NASSP portability patches on top of the existing x64/CMake work (PR #1288).
+Take **this repo's current Orbiter core** and **current NASSP**, starting from CaptainSwag101's CMake/x64 branch, and put them in **one tree with one CMake build**. Replace every Windows-only subsystem with a single cross-platform stack:
+- **SDL3** for windows and input;
+- a new **Rust `wgpu` graphics client** (Metal on macOS, Vulkan on Linux, DX12 on Windows);
+- **miniaudio** for sound;
+- `dlopen`/`LoadLibrary` for modules;
+- a **Win32 type/CRT shim header** so the 400k lines of NASSP compile with minimal edits.
 
-   **A Rust simulation core is not on that path.** It adds a compatibility shim NASSP would have to pass through, and delays the goal by more than a year.
-3. So the recommendation from the investigation is **re-ordered, not replaced**:
-   - Put **Rust where it is needed anyway**: a new `wgpu` graphics client, which has to exist for macOS regardless of language.
-   - **Port the existing C++ core** to macOS rather than rewriting it.
-   - **Defer the Rust core.** When it happens, it will have a ready-made acceptance test: NASSP headless golden runs.
-4. A large part of the NASSP-side work **already exists upstream**. CaptainSwag101's PR #1288 moves NASSP to CMake and x64 on Orbiter 2024 (184 commits, open since 2024-08-09, last active 2026-05-30). The first practical step is to help land it.
+Cut everything not needed to fly: the Launchpad, D3D9Client, HTML help, Utils, the NASSP Configurator, and initially sound and joystick. **Grow the renderer in levels**:
+1. **L1:** 2D panels, MFDs, meshes and simple planets. This is enough to fly Apollo on panels.
+2. **L2:** Moon-landing-grade terrain, VC, FDAI, sound and joystick.
+3. **L3:** eye candy.
 
----
-
-## 2. What NASSP Actually Depends On (Measured)
-
-### 2.1 Size
-| Directory | LOC | Contents |
-|---|---:|---|
-| `src_launch` | 87k | MCC/RTCC mission logic, launch complex vessels (VAB, ML, Crawler, LC34/37) |
-| `src_rtccmfd` | 86k | RTCC MFD: trajectory planning math |
-| `src_csm` | 67k | Command/Service Module: panels, VC, systems |
-| `src_lm` | 50k | Lunar Module |
-| `src_sys` | 40k | Shared systems: PanelSDK (electrical/thermal/hydraulic), yaAGC, IMU, DSKY, FDAI, switches |
-| `src_saturn` | 38k | Saturn IB/V stages, IU, LVDC |
-| other (`aux`, `mfd`, `moon`, `skylab`, `landing`) | 32k | Utilities, MFDs, surface payloads |
-| **Total** | **~400k** | 46 separate DLL projects |
-
-Most of this is **pure computation**: systems simulation, AGC emulation and trajectory math. It is portable once it compiles with clang.
-
-### 2.2 Platform dependencies
-| Dependency | Where | Size | Portable fix | Effort |
-|---|---|---|---|---|
-| **Build: MSVC `.vcxproj`, 32-bit only.** The `x64` solution configs map back to `Win32`, so NASSP has never shipped 64-bit | `Build/VC2017/*.vcxproj` (46) | — | **PR #1288** (CMake, x64) already does this; add clang/macOS toolchain handling on top | Land #1288, then about 1 week |
-| MSVC CRT-isms (`_stricmp`, `sprintf_s`, `strcpy_s`, `__int64`, `#pragma warning`, …) | 121 files | ~1,800 occurrences | One `nassp_compat.h` (macros/inlines) plus some `std::` replacements. Mechanical | 1–2 weeks |
-| **Win32 bitmap resources for panel art** (`LoadBitmap(hDLL, MAKEINTRESOURCE(id))`) | `saturnpanel.cpp`, `lempanel.cpp`, MFDs, … | 62 call sites; 226 entries in the CSM `.rc` alone | Replace `LOADBMP(id)` with a generated `id → Bitmaps/ProjectApollo/*.bmp` table plus `oapiLoadSurfaceEx`. The `.rc` files already contain the mapping, so it can be generated by a script | 1–2 weeks |
-| `oapiRegisterPanelBackground(HBITMAP)` | CSM/LM legacy panels | 35 calls | Needs a new **surface-based overload in Orbiter** (§3), then a mechanical NASSP change | days (after the Orbiter change) |
-| **2D FDAI ball: WGL OpenGL into a GDI DIB, then `oapiGetDC` blit** | `src_sys/FDAI.cpp` | 1 class | CPU rasterizer for a 180×180 textured sphere, pushed through a new **pixel-upload API** (§3). The VC FDAI is already a textured mesh and is unaffected. Still WGL on every existing branch, including `CMake-RenderingOverhaul` | 1–2 weeks |
-| DirectInput 8 joysticks (RHC/THC, VESIM) | `saturn.cpp`, `LEM.cpp`, `src_aux/vesim.cpp` (+ bundled `dinput.h`) | 3 files | Route through a new Orbiter joystick API (backed by SDL3), or SDL3 directly in VESIM. VESIM is already the abstraction seam | 1–2 weeks |
-| Winsock telemetry/uplink servers | `ProjectApolloMFD.cpp`, `ARCore.cpp`, `csm_telecom.*`, `lm_telecom.*` | ~6 files | `WSAStartup`/`SOCKET`/`closesocket` shim over BSD sockets | ~1 week |
-| Win32 Launchpad dialog (4-tab Configurator) | `ProjectApolloConfigurator.cpp` | 132 Win32 dialog calls | Rewrite as an ImGui-based Launchpad item (needs the Orbiter Launchpad port, §3) | 1–2 weeks |
-| Debug BMP dump via GDI | `scs.cpp:5478-5600` | 1 function | `#ifdef _WIN32` or write via `stb_image_write` | hours |
-| DirectSound | `soundevents.cpp` `InitDirectSound` | **dead code** (declared and defined, never called) | Delete | hours |
-| Sound | `soundlib.cpp` → **XRSound** (Orbiter tree) → irrKlang (proprietary) | — | Replace XRSound's backend with miniaudio in Orbiter. The NASSP code is unchanged | 2–4 weeks (Orbiter side) |
-| Lua 5.1 called directly | `saturn.cpp` (~60 refs) | — | Link the same Lua as Orbiter | trivial |
-| Threads | `std::thread`/`std::mutex` (MCC, AGC, `thread.h`) | — | Already portable | — |
-| Excel checklists (`BasicExcelVC6`) | `checklistController*` | — | Already forces UTF-16 (`SIZEOFWCHAR_T 2`), so it survives `wchar_t` being 4 bytes on macOS. Replace `__int64` with `int64_t`. (CaptainSwag101 also has a `TSVChecklists` branch) | days |
-| yaAGC / yaAEA | `src_sys/yaAGC`, `src_lm/yaAGS` | — | Upstream Virtual AGC is portable C that already runs on Linux and macOS | low risk |
-
-**Conclusion:** Windows-specific code in NASSP is **narrow and local**: about 15 files beyond the mechanical CRT changes. No GDI drawing remains outside the FDAI, because everything else already uses `oapi::Sketchpad`. No `CreateThread` calls or Win32 message loops.
-
-### 2.3 What NASSP needs from the engine
-These are the Orbiter features a new graphics client and core must support for NASSP specifically:
-- **Legacy 2D panel API (`clbkLoadPanel`, v1)** for both CSM and LM: `oapiRegisterPanelArea`, `oapiBlt` with **colour-key** surfaces and `SURF_PREDEF_CK`, and redraw events. About 700 panel/surface calls in `saturnpanel.cpp` alone and about 430 in `lempanel.cpp`. This is thousands of small blits per frame, so the renderer must batch them (`clbkBeginBltGroup`/`EndBltGroup` exist for this).
-- **Virtual cockpit:** `oapiVCRegisterArea`, `clbkVCRedrawEvent` into dynamic textures, `clbkVCMouseEvent`, mesh animations, `GetDevMesh` and material edits.
-- **The `gcCore` extension, for a subset only:** `SetMeshMaterial`/`MeshMaterial`, used for emissive VC panel lighting in `saturnvc.cpp` and `lemvc.cpp`. The custom-camera use is commented out. `SetMeshMaterial` is equivalent to Orbiter's standard `clbkSetMeshMaterialEx(MatProp)`, so NASSP could switch to the core API and drop the `gcCore` dependency.
-- **Sketchpad text with specific faces:** "Arial", "Courier", "Sans", plus RTCC "MOCR" display fonts. Needs a font mapping to bundled or system fonts on macOS.
-- **Local lights** (LM/CSM floodlights, launch-pad floodlights), exhaust particle streams, beacons.
-- **Planet rendering for Earth and Moon** at landing-grade resolution (lunar elevation tiles). Physics-side elevation already lives in the core (`ElevationManager`).
-- **Lua 5.1**, XRSound, and MFD registration (`oapiRegisterMFDMode`: ProjectApolloMFD, RTCC MFD, Checklist MFD).
+**The renderer is the critical path; everything else runs in parallel with it.**
 
 ---
 
-## 3. Orbiter-Side Changes That NASSP Specifically Requires
+## 2. Key Decisions (Made for Speed)
 
-These go beyond the generic Phase 0 ("portable C++ core") in the investigation doc.
-
-| Change | Why (NASSP) | Notes |
+| Decision | Choice | Why |
 |---|---|---|
-| Portable SDK headers: no `<windows.h>` on non-Windows; `DWORD = uint32_t`, `BOOL`, `RECT`, `RGB()`, opaque `HINSTANCE`/`HWND` | NASSP uses `DWORD` 626 times and relies on `windows.h` arriving via `OrbiterAPI.h` | Keep a Win32-types shim header; never make `DWORD` an LP64 `unsigned long` |
-| `oapiRegisterPanelBackground(SURFHANDLE, …)` and `oapiCreateSurface` from file/memory without `HBITMAP` | Legacy panels (35 calls) | The core currently does `GetObject(hBmp)` in `Panel::DefineBackground` (`Src/Orbiter/Panel.cpp:140`) and GDI in `GraphicsClient::clbkCreateSurface(HBITMAP)` (`GraphicsAPI.cpp:566`) |
-| **Pixel upload** into a surface (for example `oapiUpdateSurface(SURFHANDLE, const uint32_t* rgba, int pitch)`) | 2D FDAI (the only remaining `oapiGetDC` user) | Also useful for any addon that renders on the CPU; a small, upstreamable API |
-| Joystick API through the platform layer (SDL3) | VESIM RHC/THC | Or allow addons to link SDL3 directly; the SDL3 PR (orbitersim#561) already raises this question |
-| Launchpad extension API without `DLGPROC` (ImGui) | Configurator | Upstream is already moving dialogs to ImGui (#614) |
-| XRSound backend without irrKlang | All NASSP audio | Benefits every XR/NASSP user |
-| Case-insensitive VFS plus `\` → `/` normalisation | NASSP config and texture paths (for example `"Textures\\ProjectApollo\\FDAI_Ball.dds"`) | APFS is case-insensitive by default, but separators still need normalising |
-
-All of these are **useful upstream on Windows too**. That is the argument for landing them in `orbitersim/orbiter` instead of carrying them in a fork.
-
----
-
-## 4. The Plan
-
-### Milestones
-| # | Milestone | Content | Exit test | Rough effort |
-|---|---|---|---|---|
-| **M1** | **NASSP x64 plus CMake on Windows** | Land PR #1288 (review, rebase, CI). Add a **`clang-cl` CI job** so clang-incompatible code shows up while still on Windows | Apollo 7 and Apollo 11 scenarios fly on Orbiter 2024 x64; 32-bit and 64-bit behave the same | 2–4 weeks (mostly review and coordination) |
-| **M2** | **Headless Orbiter core on macOS** | Portable platform layer (build on SDL3 PR #561); portable SDK headers (§3); `dlopen` module loading; VFS; clang/arm64 CI. D3D9Client excluded | `Orbiter --scenario "Delta-glider/…" --fixedstep 0.02 --maxframes N` on macOS matches Windows x64 within tolerance | 2–3 months |
-| **M3** | **NASSP headless on macOS**, the key de-risking step | Compile all NASSP modules against the portable SDK. FDAI, Configurator, VESIM and sockets are behind `#ifdef` stubs; resource bitmaps map to files; `nassp_compat.h` | Saturn V launch → orbit → TLI headless, with AGC state and trajectory compared against the Windows x64 golden run | 3–6 weeks |
-| **M4** | **Rust `wgpu` graphics client MVP, scoped to NASSP** | C-ABI bridge for `GraphicsClient`; meshes and animations; legacy 2D panels with colour-keyed blit batching; VC dynamic textures; Sketchpad (lines, polys, text with font mapping); Earth and Moon tiles and elevation; basic atmosphere; stars; particles; local lights; ImGui; `SetMeshMaterialEx` | CSM and LM panels and VCs render correctly; screenshot diffs against D3D9Client on Windows for fixed camera scripts | 5–8 months |
-| **M5** | **NASSP interactive on macOS** | FDAI pixel path, SDL joystick in VESIM, POSIX sockets, ImGui Configurator, miniaudio XRSound | An Apollo 11 mission is playable end-to-end on an M-series Mac | 1–2 months |
-| **M6** | **Ship** | `.app` bundle with a user data root, codesigning and notarization (`disable-library-validation` for addon dylibs), NASSP texture pack install flow, Intel Mac as a secondary target | Signed build that a tester can install | 3–6 weeks |
-| *later* | *Rust core* | Port the core behind a C ABI plus the C++ compat SDK, using **M3 NASSP headless golden runs as the conformance suite** | NASSP golden runs match | 12+ months |
-
-M2 and M4 can run **in parallel** after an initial week of agreeing the C-ABI graphics bridge. The Rust renderer can be developed on Windows first against the existing C++ core, with D3D9Client beside it as the visual reference. It then moves to macOS as soon as M2 lands. **Rough calendar for one strong full-time engineer: 12–15 months to M5**, and less with two people (one on core/NASSP, one on the renderer).
-
-### Why the renderer should be Rust but the core should not (yet)
-- The renderer **must be rewritten for macOS in any language**. D3D9 and D3DX effects have no Metal path. `wgpu` gives Metal, Vulkan and DX12 from one codebase, and the `GraphicsClient` boundary is narrow and already well defined. This is where Rust adds the most value per unit of risk.
-- The core **does not need rewriting to run on macOS**. It needs de-Win32-ing. A Rust core would still have to host NASSP's C++ (VESSEL4 subclasses, virtual callbacks, `MESHGROUP*` editing, Lua state sharing), so it would sit behind a C++ compat SDK. That doubles the surface to validate before NASSP runs at all.
-- Once NASSP runs natively, NASSP's **headless golden runs become the conformance suite** that makes a Rust core rewrite safe to do later.
+| Base code | **Current** Orbiter (this branch) plus **current** NASSP via CaptainSwag101's `CMake` branch | Newest code with CMake already done. Avoids a 2–3-year merge debt |
+| TheGondos's Linux port | **Reference only; cherry-pick ideas and fixes** | His NASSP is 3 years stale and his core fork is ~2.5 years old. His 2D FDAI is commented out. His OpenGL client (GL 3.3, runs on macOS but deprecated) is self-described as needing a rewrite, with a broken tile loader |
+| Repo layout | This repo plus `Addons/NASSP` as a **git submodule** pointing at your NASSP fork (branch `macos`) | NASSP is 1.2 GB with textures, so keep it out of this repo's history. Edit both freely |
+| Engine packaging | Core becomes a **shared library** (`liborbiter.dylib/.so/.dll`) plus a thin `orbiter` executable. Addons link the library | Avoids "link against the executable" tricks (`-bundle_loader`, `-rdynamic`, import libs from an `.exe`), with the same model on all three OSes |
+| Addon ABI | **Whatever compiles.** Same C++ SDK headers, now platform-neutral. Not compatible with any existing binary | Everything is built from source together |
+| Win32-isms in SDK and NASSP | **Shim header** (`win32_compat.h`): `DWORD=uint32_t`, `BOOL`, `RECT`, `POINT`, `RGB()`, `HINSTANCE=void*`, `MAX_PATH`, `_stricmp→strcasecmp`, `sprintf_s→snprintf`, `strcpy_s`, `__int64`, `ZeroMemory`, … | Clears most of the ~1,800 MSVC-isms in NASSP without touching call sites |
+| Windowing and input | **SDL3** in the core (window, keyboard, mouse, gamepad). Map SDL scancodes to Orbiter's `OAPI_KEY_*` (DIK) codes | One path on all OSes. Hands the native surface (Metal layer, HWND, Wayland/X11) to `wgpu` |
+| Renderer | **Rust `wgpu` client** as a static library inside a thin C++ `GraphicsClient` plugin (C ABI between them, built via **Corrosion** in CMake) | Required for macOS anyway. Same code gives Vulkan/DX12 on Linux/Windows. Keeps Rust in scope |
+| ImGui | Core keeps Dear ImGui with `imgui_impl_sdl3` for input. **The Rust client draws `ImDrawData`** (vertex, index and command lists over FFI, about 300 lines) | No C++ GPU backend needed |
+| Sound | **Phase L1: off.** L2: XRSound's API re-backed by **miniaudio** | Not needed to fly |
+| Launchpad | **Deleted.** Launch with `orbiter --scenario <path>`; add a tiny ImGui scenario picker later | 105 Win32 dialogs cut. The biggest core-side saving |
+| D3D9Client | **Not built.** Optionally built on Windows only, as a visual reference | Nothing to port |
+| Joystick (NASSP VESIM, RHC/THC) | L1: keyboard and mouse. L2: SDL3 gamepad/joystick behind VESIM | VESIM is already the seam |
+| Telemetry sockets | Winsock → BSD sockets via a ~50-line shim (or stub in L1) | Trivial |
+| FDAI (2D panel ball) | **CPU software rasterizer** (180×180 textured sphere) plus a new `oapiUpdateSurface(surf, rgba, pitch)` API | Removes WGL/GDI. The VC FDAI is already a mesh |
+| Panel bitmaps in DLL resources | Script converts `.rc` (`IDB_x BITMAP "file.bmp"`) into a generated `id → path` table; `LOADBMP(id)` becomes `oapiLoadSurfaceEx(path)` | 62 call sites, zero hand edits |
+| `oapiRegisterPanelBackground(HBITMAP)` | **Change the signature** to take `SURFHANDLE` and edit NASSP's 35 calls | We own both sides |
+| Paths | VFS in the core: `\` → `/`, case-insensitive lookup | Needed on Linux (case-sensitive); harmless on macOS/Windows |
+| 64-bit and LP64 | clang everywhere, with `-Werror=pointer-to-int-cast` and friends. `long` audit in serialisation and yaAGC | NASSP never shipped 64-bit; macOS `long` is 64-bit, unlike Windows x64 |
 
 ---
 
-## 5. Alternatives Considered for This Goal
+## 3. What We Are Porting (Measured)
 
-| Option | Verdict for "NASSP on macOS" |
+### NASSP (~400k LOC, 46 DLLs)
+Windows-specific code is **narrow**: about 15 files beyond mechanical CRT changes.
+
+| Item | Where | Race fix | Level |
+|---|---|---|---|
+| MSVC CRT-isms (~1,800 occurrences in 121 files) | everywhere | `win32_compat.h` | L1 |
+| Resource bitmaps (`LoadBitmap(hDLL, MAKEINTRESOURCE)`, 62 sites, 226+ `.rc` entries) | `saturnpanel.cpp`, `lempanel.cpp`, MFDs, … | Generated table plus `oapiLoadSurfaceEx` | L1 |
+| Panel backgrounds (`HBITMAP`, 35 calls) | CSM/LM panels | API changed to `SURFHANDLE` | L1 |
+| Winsock | `ProjectApolloMFD.cpp`, `ARCore.cpp`, `csm_telecom.*`, `lm_telecom.*` | Stub (L1), then BSD sockets | L1/L2 |
+| DirectSound | `soundevents.cpp` `InitDirectSound` | **Dead code: delete** | L1 |
+| Debug BMP dump (GDI) | `scs.cpp:5478-5600` | `#ifdef _WIN32` | L1 |
+| Lua 5.1 used directly | `saturn.cpp` | Link the engine's Lua | L1 |
+| Win32 Configurator (Launchpad tabs) | `ProjectApolloConfigurator.cpp` | **Excluded from build**; edit cfg files by hand | — |
+| 2D FDAI (WGL into a DIB, then `oapiGetDC`) | `src_sys/FDAI.cpp` | Stub (L1: frame and needles only, as Gondos did), then CPU rasterizer plus `oapiUpdateSurface` | L2 |
+| DirectInput joysticks | `saturn.cpp`, `LEM.cpp`, `vesim.cpp` | Compiled out (L1), then SDL3 in VESIM | L2 |
+| XRSound (via irrKlang) | `soundlib.cpp` | Null backend (L1), then miniaudio | L2 |
+| Excel checklists (`BasicExcelVC6`) | checklist controller | Already UTF-16-safe; fix `__int64` | L1 |
+| yaAGC / yaAEA | `src_sys/yaAGC`, `src_lm/yaAGS` | Portable C upstream; audit `long` | L1 |
+| Threads | `std::thread` | Already portable | — |
+
+### Orbiter core (keep; de-Win32)
+| Item | Race fix |
 |---|---|
-| **CrossOver / Wine on macOS** (32-bit Windows build via wine32on64; D3D9 → wined3d → GL/Metal) | Worth a one-day **stopgap experiment** for playtesting. It is not a product: performance and stability are unknown and heavy D3D9 use may be fragile. It is not a path to Rust |
-| **Rust core first** | Does not move NASSP closer; the C++ SDK and shim are still needed. It pushes NASSP-on-Mac out by more than a year |
-| **Greenfield Rust engine with a new API** | Incompatible with NASSP (400k LOC). Rejected |
-| **C++ renderer instead of Rust** (Metal via `metal-cpp`, Vulkan plus MoltenVK, or a line-by-line port of D3D9Client) | Viable at roughly equal effort. A line-by-line D3D9Client port reuses more algorithms but inherits the D3DX-effects coupling and the LGPL. Choose it only if Rust stops being a goal |
-| **OpenGL renderer** (TheGondos' approach) | OpenGL on macOS is frozen at 4.1 and deprecated. Rejected for a Mac-first target |
+| `WinMain`, message loop, `HWND` | SDL3 event loop; window owned by the core; native handle passed to the graphics client (API changed freely) |
+| Launchpad (Win32 dialogs) | Delete. CLI launch |
+| DirectInput (keyboard/joystick) | SDL3 |
+| `LoadLibrary`/`GetProcAddress` | `dlopen`/`dlsym` wrapper; `.dylib`/`.so`/`.dll` suffix |
+| WIC image I/O, `HBITMAP` helpers | `stb_image` / `stb_image_write` |
+| HTML Help, registry (Wine check), `timeBeginPeriod` | Delete |
+| D3D7 types in `Baseobj.cpp`/`Mesh.h` (`d3d.h`) | Tiny replacement header with the structs |
+| `CreateThread` (scenario watcher, console) | `std::thread`, or delete (Launchpad gone) |
+| Paths and case | VFS layer |
 
 ---
 
-## 6. Risks Specific to NASSP
+## 4. Renderer Scope by Level
 
-1. **64-bit and LP64 latent bugs.** NASSP has never shipped 64-bit. Gondos saw "the VC camera shifts backward on tower jettison" on 64-bit Linux. On macOS `long` is 64-bit, unlike Windows x64, so structs and serialisation using `long` need auditing (the yaAGC headers use it). M1 (Windows x64) and M3 (headless macOS) surface these before graphics.
-2. **Numerical divergence.** The AGC and LVDC are coupled to the simulation step. clang on arm64 fuses FMA by default (`-ffp-contract=on`), so trajectories drift from Windows. Build comparison runs with `-ffp-contract=off` and compare with tolerances or orbital elements, not bit equality.
-3. **Panel blit throughput.** The legacy panel path issues thousands of small colour-keyed blits. A naive per-blit GPU submit will be slow, so batch into one draw per target surface per frame from day one.
-4. **Font metrics.** MOCR/RTCC displays and panel labels were laid out against Windows GDI fonts. Expect visual diffs and plan a font-mapping table with bundled fonts.
-5. **Two upstreams.** Changes land in both `orbitersim/orbiter` and `orbiternassp/NASSP`. PR #1288 has been open for more than two years, so coordination, not code, is the likely bottleneck. Keep each portability change small and valuable on Windows by itself.
-6. **Assets.** NASSP textures (4K/8K via `TexMul`) ship outside git (the AppVeyor "PA-Items" zip). The macOS installer needs a story for them.
+The Rust client implements `oapi::GraphicsClient` through a thin C++ plugin that forwards to Rust over a C ABI.
 
----
+| Level | Must render | Enough for |
+|---|---|---|
+| **L1: "It flies"** | Surfaces as textures; **blits with colour key, batched per target** (NASSP issues thousands per frame); **Sketchpad** (lines, polys, ellipses, text with a font map for Arial/Courier/Sans/MOCR); ImGui draw data; `.msh` meshes with materials, textures and animations; planets as textured spheres from level ≤ 8 tiles; star field; 2D panel composition; HUD; MFDs | Saturn V launch to orbit, TLI and burns flown from **2D panels**, with AGC/DSKY, RTCC MFD and checklists |
+| **L2: "Moon mission"** | Quadtree tile loader (`.tree` archives, BC textures uploaded directly), **elevation meshes** for lunar landing; **virtual cockpit** (dynamic textures, `clbkVCRedrawEvent`, mouse picking); `SetMeshMaterialEx` for emissive VC lighting (replacing NASSP's `gcCore` calls); local lights; exhaust particles; FDAI pixel upload | Apollo 11 end-to-end |
+| **L3: "Pretty"** | Atmosphere scattering, clouds, shadows, glare, PBR, env maps | Looks like D3D9Client |
 
-## 7. First Concrete Steps
-
-1. **NASSP #1288:** review and rebase onto current `Orbiter2016`, get CI green, land it. Then add a `clang-cl` job and fix what it finds (this starts the `nassp_compat.h` work while still on Windows).
-2. **Orbiter portable SDK header spike:** make `OrbiterAPI.h`/`VesselAPI.h` compile on macOS clang without `windows.h` (a types shim), and compile one NASSP module (for example `PanelSDK`, which is almost pure computation) against it. This proves the SDK approach in days.
-3. **Golden-run harness on Windows x64:** a tiny plugin that dumps focus-vessel state plus AGC erasable memory every N frames under `--fixedstep`, recorded for 2–3 NASSP scenarios. This becomes the oracle for M2/M3 and later for the Rust core.
-4. **Rust renderer skeleton:** define the C-ABI `GraphicsClient` bridge, open a `wgpu` window on macOS, and draw a `.msh` mesh plus a Sketchpad MFD. This validates the FFI shape early.
-5. **Upstream conversations:** propose the §3 API additions (surface-based panel background, pixel upload, joystick API) on the Orbiter forum or GitHub before implementing them.
+**Planned from day one:** camera-relative float rendering (the core already provides double-precision state), reversed-Z with an infinite far plane, and one render pass that composes all 2D panel surfaces.
 
 ---
 
-### Sources
-- [orbiternassp/NASSP](https://github.com/orbiternassp/NASSP) (`Orbiter2016` branch) and [PR #1288: Transition to Orbiter 2024 x64, CMake](https://github.com/orbiternassp/NASSP/pull/1288)
-- [CaptainSwag101/NASSP](https://github.com/CaptainSwag101/NASSP) (`CMake`, `CMake-RenderingOverhaul`, `TSVChecklists` branches)
-- [Orbiter Forum: NASSP OpenOrbiter / Orbiter 2024 compatibility thread](https://orbiter-forum.com/threads/nassp-openorbiter-compatibility-thread.40510)
-- [orbitersim/orbiter PR #561: SDL3 port](https://github.com/orbitersim/orbiter/pull/561)
+## 5. Parallel Tracks and Timeline
+
+Rough numbers, for **one focused engineer**; two people (core+NASSP / renderer) roughly halves the calendar. These are estimates, not measurements.
+
+```
+Week:        1   2   3   4   5   6   7   8   9  10  11  12 ...  ~24
+Track A  [core: SDL3, shims, VFS, dylib, CLI launch, headless on mac]
+(core)               [NASSP: submodule, CMake for clang, compat hdr,
+                      bitmap table, stubs → headless Saturn V run]
+Track B  [bridge C ABI][wgpu window + ImGui][surfaces/blits/Sketchpad]
+(render)                           [meshes, spheres, stars, panels]
+                                               ▲ L1 "It flies" on macOS (~wk 10–12)
+                                                        [tiles+elev, VC, FDAI,
+                                                         sound, joystick] ▲ L2 (~wk 24)
+CI       [macOS arm64 + Linux + Windows matrix from week 1, headless smoke test]
+```
+
+| Milestone | Exit test (all three OSes in CI; interactive checks on macOS) |
+|---|---|
+| **A1: Core headless** (~wk 3–4) | `orbiter --scenario "Delta-glider/…" --fixedstep 0.02 --maxframes 5000` runs; state matches a Windows reference within tolerance |
+| **A2: NASSP headless** (~wk 6–8) | All NASSP modules build and load; Saturn V launch to orbit headless; AGC runs; `CurrentState.scn` sane |
+| **B1: Window** (~wk 3) | `wgpu` window via SDL3 on Metal; ImGui dialogs from the core render |
+| **B2: 2D** (~wk 6–7) | Stock HUD and MFDs render; blit/colour-key test scene matches D3D9Client screenshots (Windows) |
+| **L1** (~wk 10–12) | NASSP CSM 2D panels usable; launch to orbit flown on macOS |
+| **L2** (~wk 20–26) | Lunar landing with terrain; VC; sound; joystick |
+
+**Windows and Linux ride along:** the same SDL3, `wgpu` and miniaudio code runs everywhere. The platform-specific items are the `dlopen` suffix, `wgpu` surface creation from SDL's native handle, and Linux case-sensitivity (handled by the VFS).
+
+---
+
+## 6. Race Risks
+
+1. **LP64 and 64-bit bugs in NASSP.** It never shipped 64-bit, and Gondos saw a VC camera shift on 64-bit Linux. *Mitigation:* A2 headless first, with UBSan/ASan builds on Linux.
+2. **Panel blit throughput.** Thousands of small colour-keyed blits per frame. *Mitigation:* batch per target surface from the first implementation; never submit per blit.
+3. **Font metrics.** MOCR/RTCC and panel text were laid out for GDI fonts. *Mitigation:* bundle fonts and keep a face-mapping table; accept small visual diffs.
+4. **FFI surface.** `Sketchpad` has 74 virtuals and `GraphicsClient` 79, and many are called per frame. *Mitigation:* the C++ shim records draw commands into a buffer and Rust consumes one batch per surface per frame, instead of one FFI call per primitive.
+5. **Numerical divergence.** Comparisons against Windows use tolerances. Build with `-ffp-contract=off` when comparing.
+6. **Textures and assets.** NASSP's 4K/8K textures and Orbiter's planet textures come from release zips, not git. The local setup script needs to fetch or point at them (`ORBITER_PLANET_TEXTURE_INSTALL_DIR` already exists).
+
+---
+
+## 7. First Steps (This Week)
+
+1. **Tree setup:** add `Addons/NASSP` as a submodule (your NASSP fork, branch `macos`, based on CaptainSwag101's `CMake`). Add a top-level CMake option to build it. Add a CI matrix (macOS arm64, Ubuntu, Windows) with a headless smoke test.
+2. **`win32_compat.h` plus portable SDK headers:** get `OrbiterAPI.h`/`VesselAPI.h` compiling with Apple clang, then compile NASSP's `PanelSDK` (almost pure computation) against them. This proves the shim approach in about a day.
+3. **Core de-Win32 spike:** SDL3 main loop, delete the Launchpad, `dlopen` loader, `liborbiter` shared library, then run headless on macOS (A1).
+4. **Renderer spike:** C-ABI `GraphicsClient` bridge, Rust crate via Corrosion, and a `wgpu` surface from an SDL3 window (Metal layer on macOS). Then clear the screen and draw `ImDrawData` (B1).
+
+If useful, I can start on steps 1 and 2 right away. The shim header and portable SDK headers are the foundation both tracks depend on.
