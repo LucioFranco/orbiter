@@ -209,6 +209,7 @@ struct CFG_DEVPRM {
 	DWORD  Device_style;		// Rendering layout
 	bool   bForceEnum;			// force enumeration, bypass device.dat
 	bool   bFullscreen;			// use window mode
+	bool   bMultiMonitor;		// allow dialogs to be undocked from the main window (requires >1 monitor)
 	bool   bStereo;				// use stereo mode
 	bool   bNoVsync;			// no vertical sync (fullscreen only)
 	bool   bTryStencil;			// try stencil buffers when available

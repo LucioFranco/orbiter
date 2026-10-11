@@ -524,8 +524,9 @@ void DialogManager::InitImGui()
 	ImGui::CreateContext();
 	ImPlot::CreateContext();
 	ImGuiIO& io = ImGui::GetIO();
-	// Viewports don't play nice when in full screen mode
-	if(!pOrbiter->IsFullscreen())
+	// Viewports (dialogs undocked into their own OS windows) don't play nice in full screen mode,
+	// and on a single monitor a dialog dragged past the window edge would disappear.
+	if(!pOrbiter->IsFullscreen() && pOrbiter->Cfg()->CfgDevPrm.bMultiMonitor && GetSystemMetrics(SM_CMONITORS) > 1)
 		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
 	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
