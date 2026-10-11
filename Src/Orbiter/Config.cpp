@@ -184,6 +184,7 @@ CFG_DEVPRM CfgDevPrm_default = {
 	0,
 	true,		// bForceEnum (enumerate devices at each simulation start)
 	false,		// bFullscreen (default to window mode)
+	true,		// bMultiMonitor (allow undocked dialogs if more than one monitor)
 	false,		// bStereo (no stereo support)
 	false,		// bNoVsync (enable vsync)
 	false,		// bTryStencil (don't enable stencil buffering)
@@ -527,6 +528,7 @@ bool Config::Load(const char *fname)
 	if (GetInt(ifs, "Style", i)) CfgDevPrm.Device_style = (DWORD)i;
 	GetBool (ifs, "DeviceForceEnum", CfgDevPrm.bForceEnum);
 	GetBool (ifs, "Fullscreen", CfgDevPrm.bFullscreen);
+	GetBool (ifs, "MultiMonitor", CfgDevPrm.bMultiMonitor);
 	GetBool (ifs, "Stereo", CfgDevPrm.bStereo);
 	GetBool (ifs, "NoVSync", CfgDevPrm.bNoVsync);
 	GetBool (ifs, "StencilBuffer", CfgDevPrm.bTryStencil);
@@ -1241,6 +1243,8 @@ BOOL Config::Write (const char *fname) const
 			ofs << "DeviceForceEnum = " << BoolStr (CfgDevPrm.bForceEnum) << '\n';
 		if (CfgDevPrm.bFullscreen != CfgDevPrm_default.bFullscreen || bEchoAll)
 			ofs << "Fullscreen = " << BoolStr (CfgDevPrm.bFullscreen) << '\n';
+		if (CfgDevPrm.bMultiMonitor != CfgDevPrm_default.bMultiMonitor || bEchoAll)
+			ofs << "MultiMonitor = " << BoolStr (CfgDevPrm.bMultiMonitor) << '\n';
 		if (CfgDevPrm.bStereo != CfgDevPrm_default.bStereo || bEchoAll)
 			ofs << "Stereo = " << BoolStr (CfgDevPrm.bStereo) << '\n';
 		if (CfgDevPrm.bNoVsync != CfgDevPrm_default.bNoVsync || bEchoAll)
