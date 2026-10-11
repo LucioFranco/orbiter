@@ -527,6 +527,10 @@ void DialogManager::InitImGui()
 	// Viewports don't play nice when in full screen mode
 	if(!pOrbiter->IsFullscreen())
 		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+	// Make the main window the owner of detached dialogs, so they stay above it
+	// (and follow it through alt-tab/minimize) instead of getting buried behind it
+	io.ConfigViewportsNoDefaultParent = false;
+	io.ConfigViewportsNoTaskBarIcon = true;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
 	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 	//io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
